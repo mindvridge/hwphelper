@@ -1,0 +1,36 @@
+programs:
+  예비창업패키지:
+    fonts_allowed: ["맑은 고딕", "함초롬바탕", "돋움"]
+    body_size_range: [10, 12]
+    title_size_range: [13, 16]
+    char_spacing_range: [-5, 0]
+    line_spacing_range: [160, 180]
+    margins: { top: 20, bottom: 15, left: 20, right: 20 }
+
+  창업성장기술개발:
+    fonts_allowed: ["맑은 고딕", "함초롬바탕"]
+    body_size_range: [10, 11]
+    title_size_range: [12, 14]
+    char_spacing_range: [-3, 0]
+    line_spacing_range: [160, 180]
+
+  데이터바우처:
+    fonts_allowed: ["맑은 고딕"]
+    body_size_range: [10, 12]
+    title_size_range: [13, 16]
+    char_spacing_range: [-5, 0]
+    line_spacing_range: [160, 180]
+
+  TIPS:
+    fonts_allowed: ["맑은 고딕", "나눔고딕"]
+    body_size_range: [10, 12]
+    title_size_range: [13, 16]
+    char_spacing_range: [-5, 0]
+    line_spacing_range: [150, 180]
+
+  기본:
+    fonts_allowed: ["맑은 고딕", "함초롬바탕", "돋움", "나눔고딕"]
+    body_size_range: [9, 12]
+    title_size_range: [12, 18]
+    char_spacing_range: [-10, 5]
+    line_spacing_range: [130, 200]

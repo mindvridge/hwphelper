@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+venv/
+
+# Node
+node_modules/
+frontend/dist/
+
+# 환경 설정
+.env
+
+# 업로드/출력
+uploads/*
+outputs/*
+!uploads/.gitkeep
+!outputs/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 샘플/테스트 HWP
+*.hwp
+*.hwpx
+
+# uv lock (선택)
+# uv.lock
+
+# 기타
+.pytest_cache/
+data/chroma_db/

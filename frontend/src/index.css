@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── 기본 ──────────────────────────────────────── */
+
+body {
+  margin: 0;
+  font-family:
+    "Pretendard Variable",
+    "Pretendard",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  background: #0a0a0f;
+  color: #e2e8f0;
+}
+
+/* ── 스크롤바 ──────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* ── Markdown prose 다크 오버라이드 ──────────────── */
+
+.prose-invert {
+  --tw-prose-body: #cbd5e1;
+  --tw-prose-headings: #f1f5f9;
+  --tw-prose-links: #818cf8;
+  --tw-prose-bold: #f1f5f9;
+  --tw-prose-code: #e2e8f0;
+  --tw-prose-pre-bg: #1e293b;
+  --tw-prose-pre-code: #e2e8f0;
+}
+
+.prose pre {
+  border-radius: 0.75rem;
+  border: 1px solid #334155;
+}
+
+.prose code {
+  font-size: 0.8em;
+  background: #1e293b;
+  padding: 0.15em 0.4em;
+  border-radius: 0.25rem;
+}
+
+/* ── 타이핑 애니메이션 ─────────────────────────── */
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.typing-cursor::after {
+  content: "\25AE";
+  animation: blink 1s infinite;
+  margin-left: 2px;
+  color: #818cf8;
+}

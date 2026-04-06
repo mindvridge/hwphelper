@@ -1,0 +1,62 @@
+models:
+  qwen3.5-27b:
+    provider: openai_compatible
+    model: Qwen3.5-27B
+    base_url_env: QWEN_BASE_URL
+    api_key_env: QWEN_API_KEY
+    default_base_url: "https://llm.mindprep.co.kr/v1"
+    max_tokens: 4096
+    supports_tools: true
+    supports_vision: true
+    tool_choice: "auto"
+    description: "Qwen3.5-27B — 도구호출, 비전, 추론, 웹검색, STT"
+
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    api_key_env: ANTHROPIC_API_KEY
+    max_tokens: 4096
+    description: "Claude Sonnet 4 — 한국��� 품질 우수, 구조화 출력 강점"
+
+  claude-opus:
+    provider: anthropic
+    model: claude-opus-4-20250514
+    api_key_env: ANTHROPIC_API_KEY
+    max_tokens: 4096
+    description: "Claude Opus 4 — 최고 ���질, 복잡한 계획서에 적합"
+
+  gpt-4o:
+    provider: openai
+    model: gpt-4o
+    api_key_env: OPENAI_API_KEY
+    max_tokens: 4096
+    description: "GPT-4o — 범용 고성능"
+
+  gpt-4o-mini:
+    provider: openai
+    model: gpt-4o-mini
+    api_key_env: OPENAI_API_KEY
+    max_tokens: 4096
+    description: "GPT-4o Mini — 빠르고 저렴"
+
+  deepseek-v3:
+    provider: openai_compatible
+    model: deepseek-chat
+    base_url_env: DEEPSEEK_BASE_URL
+    api_key_env: DEEPSEEK_API_KEY
+    default_base_url: "https://api.deepseek.com/v1"
+    max_tokens: 4096
+    description: "DeepSeek V3 — 가성비 우수"
+
+  local-model:
+    provider: openai_compatible
+    model: "default"
+    base_url_env: LOCAL_LLM_BASE_URL
+    api_key_env: LOCAL_LLM_API_KEY
+    default_base_url: "http://localhost:8000/v1"
+    default_api_key: "not-needed"
+    max_tokens: 4096
+    description: "로��� 모델 (vLLM/Ollama ��)"
+
+default_model: qwen3.5-27b
+embedding_model: text-embedding-3-small
