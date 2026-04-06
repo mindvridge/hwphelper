@@ -122,6 +122,7 @@ class ChatAgent:
         self.image_gen = ImageGenerator()
         self.com_executor = com_executor
         self.conversation_history: dict[str, list[dict[str, Any]]] = {}
+        self._filling_in_progress: set[str] = set()  # 중복 실행 방지
 
     # ------------------------------------------------------------------
     # 대화 관리
@@ -216,9 +217,16 @@ class ChatAgent:
         self, session_id: str, user_message: str, model_id: str | None,
     ) -> AsyncIterator[ChatEvent]:
         """코드가 직접 분석 → LLM 생성 → COM 쓰기를 수행."""
+        # 중복 실행 방지
+        if session_id in self._filling_in_progress:
+            yield ChatEvent(type="text_delta", data="이미 자동 채우기가 진행 중입니다. 완료될 때까지 기다려주세요.")
+            return
+        self._filling_in_progress.add(session_id)
+
         try:
             session = self.doc_mgr.get_session(session_id)
         except KeyError:
+            self._filling_in_progress.discard(session_id)
             yield ChatEvent(type="text_delta", data="문서 세션을 찾을 수 없습니다. HWP 파일을 먼저 업로드해주세요.")
             return
 
@@ -289,6 +297,7 @@ class ChatAgent:
                     logger.warning("셀 생성 실패", row=row, col=col, error=str(e))
 
         # 3단계: 완료
+        self._filling_in_progress.discard(session_id)
         summary = f"\n\n{wrote}/{total_fill}개 셀 작성 완료. 한/글에서 결과를 확인하세요.\n수정이 필요하면 말씀해주세요."
         yield ChatEvent(type="text_delta", data=summary)
         self.get_history(session_id).append({"role": "assistant", "content": summary})

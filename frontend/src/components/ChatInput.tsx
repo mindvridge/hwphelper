@@ -33,6 +33,7 @@ export default function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = async () => {
+    if (isStreaming) return;
     const trimmed = input.trim();
 
     // 참고파일이 첨부되어 있으면 서버에서 텍스트 추출 후 전송
