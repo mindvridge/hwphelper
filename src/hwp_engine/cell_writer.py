@@ -1,10 +1,9 @@
-"""셀 텍스트 삽입 — 서식(CharShape/ParaShape)을 유지하면서 셀에 텍스트를 삽입.
+"""셀 텍스트 삽입 — pyhwpx 네이티브 API로 정확한 셀 이동 + 서식 보존 쓰기.
 
-핵심 전략:
-1. 대상 셀로 커서 이동 (pyhwpx ShapeObjTableSelCell)
-2. 기존 CharShape + ParaShape 캡처
-3. 셀 내 텍스트만 선택 → 새 텍스트로 교체 (InsertText가 선택 영역을 덮어씀)
-4. 표 구조는 건드리지 않음
+핵심:
+1. get_into_nth_table(n)으로 표 진입
+2. TableRightCell()로 정확한 셀 이동
+3. 기존 텍스트 선택 → 새 텍스트로 교체
 """
 
 from __future__ import annotations
@@ -44,11 +43,11 @@ class CellWriter:
         text: str,
         preserve_style: bool = True,
     ) -> None:
-        """지정된 셀에 텍스트를 삽입한다 (서식 보존, 표 구조 유지)."""
+        """지정된 셀에 텍스트를 삽입한다."""
         hwp = self._ctrl.hwp
 
-        # 1. 셀로 이동
-        self._move_to_cell(table_idx, row, col)
+        # 1. 표 진입 + 셀 이동
+        self._navigate_to_cell(hwp, table_idx, row, col)
 
         # 2. 기존 스타일 캡처
         original_char: dict[str, Any] | None = None
@@ -58,18 +57,15 @@ class CellWriter:
             except Exception:
                 pass
 
-        # 3. 셀 내 텍스트만 선택 (표 구조는 건드리지 않음)
-        self._select_cell_text_only(hwp)
+        # 3. 셀 내 텍스트 선택 → 교체
+        self._select_and_replace(hwp, text)
 
-        # 4. 스타일 복원 후 텍스트 삽입 (선택 영역을 덮어씀)
+        # 4. 스타일 복원
         if original_char and preserve_style:
             try:
                 self._ctrl.set_char_shape(original_char)
             except Exception:
                 pass
-
-        # 5. 텍스트 삽입
-        self._insert_text(hwp, text)
 
         logger.info("셀 쓰기 완료", table=table_idx, row=row, col=col, length=len(text))
 
@@ -86,74 +82,77 @@ class CellWriter:
         return results
 
     # ------------------------------------------------------------------
-    # 셀 이동
+    # 셀 이동 (pyhwpx 네이티브)
     # ------------------------------------------------------------------
 
-    def _move_to_cell(self, table_idx: int, row: int, col: int) -> None:
-        """표 내 특정 셀로 커서를 이동한다."""
-        hwp = self._ctrl.hwp
+    def _navigate_to_cell(self, hwp: Any, table_idx: int, row: int, col: int) -> None:
+        """표의 특정 셀로 정확하게 이동한다."""
+        # 표 진입 (A1 셀로 이동)
+        hwp.get_into_nth_table(table_idx)
+
+        # 표의 열 수 파악 (get_cell_addr로)
+        # A1에서 (row, col)까지 이동: row * cols + col 번 TableRightCell
+        # 열 수를 모르면 한 행씩 이동
+        target_moves = 0
+
+        # 먼저 열 수를 파악: 오른쪽으로 이동하다가 행이 바뀌는 시점
+        cols = self._detect_cols(hwp)
+
+        target_moves = row * cols + col
+
+        # A1에서 다시 시작
+        hwp.get_into_nth_table(table_idx)
+
+        for _ in range(target_moves):
+            hwp.TableRightCell()
+
+    def _detect_cols(self, hwp: Any) -> int:
+        """현재 표의 열 수를 파악한다."""
         try:
-            if hasattr(hwp, "ShapeObjTableSelCell"):
-                hwp.ShapeObjTableSelCell(table_idx, row, col)
-                return
+            # get_cell_addr()가 "A1", "B1", "C1" 등을 반환
+            # 오른쪽으로 이동하면서 행 번호가 바뀌면 열 수 확인
+            start_addr = hwp.get_cell_addr()
+            start_row = self._addr_to_row(start_addr)
+            cols = 1
+            for i in range(50):  # 최대 50열
+                hwp.TableRightCell()
+                addr = hwp.get_cell_addr()
+                curr_row = self._addr_to_row(addr)
+                if curr_row != start_row:
+                    # 행이 바뀌었으면 이전까지가 열 수
+                    return cols
+                cols += 1
+            return cols
         except Exception:
-            pass
+            return 1
 
-        # 폴백: 탭으로 이동
-        hwp.MovePos(2)
-        ctrl = hwp.HeadCtrl
-        idx = 0
-        while ctrl:
-            if ctrl.CtrlID == "tbl":
-                if idx == table_idx:
-                    try:
-                        hwp.SetPosBySet(ctrl.GetAnchorPos(0))
-                    except Exception:
-                        pass
-                    break
-                idx += 1
-            ctrl = ctrl.Next
-
-        tbl = ctrl
-        cols = 1
-        if tbl:
-            try:
-                cols = tbl.ColCount
-            except AttributeError:
-                pass
-        target = row * cols + col
-        for _ in range(target):
-            hwp.HAction.Run("TableRightCell")
-
-    # ------------------------------------------------------------------
-    # 셀 텍스트만 선택 (표 삭제 방지)
-    # ------------------------------------------------------------------
-
-    def _select_cell_text_only(self, hwp: Any) -> None:
-        """현재 셀의 텍스트만 선택한다. 표 구조는 건드리지 않는다.
-
-        방법: 셀 시작 → Shift+Ctrl+End (셀 내 텍스트만 선택)
-        한/글에서 Ctrl+A는 표 전체를 선택할 수 있으므로 사용하지 않는다.
-        """
+    @staticmethod
+    def _addr_to_row(addr: str) -> int:
+        """셀 주소에서 행 번호를 추출한다. "A1" → 1, "B3" → 3"""
         try:
-            # 셀 처음으로 이동
+            digits = "".join(c for c in addr if c.isdigit())
+            return int(digits) if digits else 0
+        except Exception:
+            return 0
+
+    # ------------------------------------------------------------------
+    # 텍스트 교체
+    # ------------------------------------------------------------------
+
+    def _select_and_replace(self, hwp: Any, text: str) -> None:
+        """현재 셀의 텍스트를 선택하고 새 텍스트로 교체한다."""
+        # 셀 내 전체 선택
+        try:
             hwp.HAction.Run("MoveColBegin")
-            # Shift+End로 셀 끝까지 선택
             hwp.HAction.Run("MoveSelColEnd")
         except Exception:
             try:
-                # 폴백: Home → Shift+End
                 hwp.HAction.Run("MoveLineBegin")
                 hwp.HAction.Run("MoveSelLineEnd")
             except Exception:
-                logger.debug("셀 텍스트 선택 실패")
+                pass
 
-    # ------------------------------------------------------------------
-    # 텍스트 삽입
-    # ------------------------------------------------------------------
-
-    def _insert_text(self, hwp: Any, text: str) -> None:
-        """현재 위치에 텍스트를 삽입한다 (선택 영역이 있으면 교체)."""
+        # 텍스트 삽입 (선택 영역 덮어쓰기)
         lines = text.split("\n")
         for i, line in enumerate(lines):
             if line:

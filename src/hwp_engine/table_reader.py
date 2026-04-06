@@ -161,60 +161,57 @@ class TableReader:
         return count
 
     def read_table(self, table_idx: int) -> Table:
-        """지정된 인덱스의 표를 읽어 Table 객체로 반환한다."""
+        """지정된 인덱스의 표를 읽어 Table 객체로 반환한다.
+
+        pyhwpx의 get_into_nth_table + TableRightCell로 순회.
+        """
         hwp = self._ctrl.hwp
-        tbl_ctrl = self._get_table_ctrl(table_idx)
 
-        if tbl_ctrl is None:
-            raise IndexError(f"표 인덱스 {table_idx}를 찾을 수 없습니다.")
+        # 표 진입 (A1)
+        hwp.get_into_nth_table(table_idx)
 
-        # 표 크기 (행, 열)
-        tbl_set = tbl_ctrl.TableSet if hasattr(tbl_ctrl, "TableSet") else None
-        rows, cols = self._get_table_size(tbl_ctrl)
+        # 열 수 파악: A1에서 오른쪽으로 이동하며 행 번호 변화 감지
+        cols = 1
+        start_row = self._addr_row(hwp.get_cell_addr())
+        for _ in range(100):
+            hwp.TableRightCell()
+            addr = hwp.get_cell_addr()
+            if self._addr_row(addr) != start_row:
+                break
+            cols += 1
 
-        table = Table(table_idx=table_idx, rows=rows, cols=cols)
+        # 다시 처음으로
+        hwp.get_into_nth_table(table_idx)
 
-        # 표의 첫 번째 셀로 이동
-        hwp.MovePos(2)  # 문서 처음
-        self._move_to_table(table_idx)
+        # 전체 셀 순회
+        cells: list[Cell] = []
+        max_row = 0
+        prev_addr = ""
+        for _ in range(5000):  # 안전 상한
+            addr = hwp.get_cell_addr()
+            if addr == prev_addr and len(cells) > 0:
+                break  # 더 이상 이동 안 됨
+            prev_addr = addr
 
-        # 셀 순회
-        visited: set[tuple[int, int]] = set()
-        for r in range(rows):
-            for c in range(cols):
-                if (r, c) in visited:
-                    continue
+            r = self._addr_row(addr) - 1  # 1-based → 0-based
+            c = self._addr_col(addr)
+            max_row = max(max_row, r)
 
-                # 해당 셀로 이동
-                if not self._move_to_cell(table_idx, r, c):
-                    continue
+            # 텍스트 읽기
+            text = self._read_cell_text_native(hwp)
 
-                # 텍스트 읽기
-                text = self._read_cell_text()
+            # 스타일 읽기
+            style = self._read_current_cell_style()
 
-                # 스타일 읽기
-                style = self._read_current_cell_style()
+            cells.append(cell)
 
-                # 병합 정보 (기본값)
-                row_span, col_span = self._get_cell_span(r, c, tbl_ctrl)
+            # 다음 셀로 이동
+            hwp.TableRightCell()
 
-                cell = Cell(
-                    row=r,
-                    col=c,
-                    row_span=row_span,
-                    col_span=col_span,
-                    text=text.strip(),
-                    cell_type=CellType.UNKNOWN,
-                    style=style,
-                )
-                table.cells.append(cell)
+        rows = max_row + 1
+        table = Table(table_idx=table_idx, rows=rows, cols=cols, cells=cells)
 
-                # 병합된 영역 표시
-                for dr in range(row_span):
-                    for dc in range(col_span):
-                        visited.add((r + dr, c + dc))
-
-        logger.info("표 읽기 완료", table_idx=table_idx, rows=rows, cols=cols, cells=len(table.cells))
+        logger.info("표 읽기 완료", table_idx=table_idx, rows=rows, cols=cols, cells=len(cells))
         return table
 
     def read_all_tables(self) -> list[Table]:
@@ -236,7 +233,39 @@ class TableReader:
         return self._read_current_cell_style()
 
     # ------------------------------------------------------------------
-    # 내부 유틸리티
+    # 주소 파싱 유틸리티
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _addr_row(addr: str) -> int:
+        """셀 주소에서 행 번호 추출. 'A1' → 1, 'C3' → 3"""
+        digits = "".join(c for c in addr if c.isdigit())
+        return int(digits) if digits else 0
+
+    @staticmethod
+    def _addr_col(addr: str) -> int:
+        """셀 주소에서 열 인덱스 추출. 'A1' → 0, 'B1' → 1, 'AA1' → 26"""
+        letters = "".join(c for c in addr if c.isalpha())
+        col = 0
+        for ch in letters.upper():
+            col = col * 26 + (ord(ch) - ord("A") + 1)
+        return col - 1  # 0-based
+
+    def _read_cell_text_native(self, hwp: Any) -> str:
+        """현재 셀의 텍스트를 pyhwpx로 읽는다."""
+        try:
+            # 셀 전체 선택 후 텍스트 가져오기
+            hwp.HAction.Run("MoveColBegin")
+            hwp.HAction.Run("MoveSelColEnd")
+            text = hwp.GetTextFile("TEXT", "")
+            # 선택 해제
+            hwp.HAction.Run("MoveColBegin")
+            return text.strip() if text else ""
+        except Exception:
+            return ""
+
+    # ------------------------------------------------------------------
+    # 내부 유틸리티 (레거시 — 폴백용)
     # ------------------------------------------------------------------
 
     def _get_table_ctrl(self, table_idx: int) -> Any:
