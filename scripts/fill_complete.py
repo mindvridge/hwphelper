@@ -288,42 +288,38 @@ FR("○○기업", "vLLM 커뮤니티")
 # ==============================================================
 
 def write_section_b(title_keyword, content):
-    """제목 키워드를 찾아 오른쪽(B열)으로 이동 후 내용 삽입."""
+    """고유한 제목 키워드로 찾아 B열에 내용 삽입."""
     hwp.MovePos(2)
     hwp.HAction.GetDefault("RepeatFind", hwp.HParameterSet.HFindReplace.HSet)
     hwp.HParameterSet.HFindReplace.FindString = title_keyword
     hwp.HParameterSet.HFindReplace.FindType = 1
     if not hwp.HAction.Execute("RepeatFind", hwp.HParameterSet.HFindReplace.HSet):
-        print(f"  X [{title_keyword}] 못찾음")
+        print(f"  X [{title_keyword[:25]}] 못찾음")
         return
     # B열로 이동
     hwp.TableRightCell()
     addr = hwp.get_cell_addr()
-    # 셀 끝으로 이동 후 줄바꿈+내용 추가
-    hwp.HAction.Run("MoveDocEnd")
-    hwp.HAction.Run("BreakPara")
-    # 글자색 검정
+    # B열에 바로 삽입 (글자색 검정)
     act = hwp.CreateAction("CharShape")
     p = act.CreateSet()
     act.GetDefault(p)
     p.SetItem("TextColor", 0)
     act.Execute(p)
-    # 내용 삽입
     hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
     hwp.HParameterSet.HInsertText.Text = content
     hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
-    print(f"  O [{title_keyword}] → {addr}")
+    print(f"  O [{title_keyword[:25]}] → {addr}")
 
 
 print("\n[본문: 1. 문제 인식 B열]")
-write_section_b("1. 문제 인식", """국내 심리상담 시장은 연간 2조원 규모이나 전문 상담사 부족과 높은 비용(회당 8-15만원)으로 접근성이 제한적이다. 청년층 67%가 비용 부담으로 상담을 포기하며, 20-30대 우울증 유병률은 18.7%로 5년간 2.3배 증가하였다.
+write_section_b("Problem)_창업", """국내 심리상담 시장은 연간 2조원 규모이나 전문 상담사 부족과 높은 비용(회당 8-15만원)으로 접근성이 제한적이다. 청년층 67%가 비용 부담으로 상담을 포기하며, 20-30대 우울증 유병률은 18.7%로 5년간 2.3배 증가하였다.
 
 기존 AI 상담 서비스(트로스트, 마보 등)는 텍스트 기반으로 평균 세션 3.2분에 그쳐 사용자 몰입도가 낮고, 전문 상담 수준에 미달하여 일회성 사용에 그치는 한계가 있다. 비대면이면서도 대면 상담에 준하는 몰입감과 전문성을 갖춘 새로운 상담 서비스가 필요하다.
 
 마인드브이알은 AI 아바타 기반 실시간 심리상담 플랫폼을 개발하여 MuseTalk 아바타 기술과 Qwen3.5 대규모 언어모델로 세션 시간 10분(3배), 재방문율 40%(2배)를 달성하여 심리상담 접근성 문제를 해결한다.""")
 
 print("\n[본문: 2. 실현 가능성 B열]")
-write_section_b("2. 실현 가능성", """[개발 계획]
+write_section_b("Solution)_창업", """[개발 계획]
 1단계(1-3개월): AI 상담 엔진 구축
  - Qwen3.5-27B 기반 한국어 심리상담 특화 파인튜닝 (학습 데이터 5,000건)
  - CBT(인지행동치료), DBT(변증법적행동치료) 기반 상담 알고리즘 설계
@@ -349,7 +345,7 @@ write_section_b("2. 실현 가능성", """[개발 계획]
  - 진입장벽: 한국어 상담 데이터 5,000건 + 아바타+감정분석 통합 파이프라인 (특허출원 예정)""")
 
 print("\n[본문: 3. 성장전략 B열]")
-write_section_b("3. 성장전략", """[경쟁사 분석]
+write_section_b("Scale-up)_사업화", """[경쟁사 분석]
  - 트로스트(국내): 텍스트 기반 AI 상담, MAU 5만, 세션 평균 3분
  - 마보(국내): 명상/마음챙김 앱, 상담 기능 미흡
  - Woebot(미국): CBT 기반 챗봇, 영어 전용
@@ -376,7 +372,7 @@ write_section_b("3. 성장전략", """[경쟁사 분석]
  2029년: 동남아 확장 + 흑자 전환 (MAU 200,000, 매출 100억)""")
 
 print("\n[본문: 4. 팀 구성 B열]")
-write_section_b("4. 팀 구성", """[대표자] 박수현
+write_section_b("Team)_대표자", """[대표자] 박수현
  - 학력: OO대학교 컴퓨터공학과 석사 (자연어처리 전공)
  - 경력: AI 스타트업 연구개발팀 5년 (NLP, 대화시스템 개발)
  - 성과: AI 관련 특허 2건, SCI 논문 3편, 정부과제 참여 2건
@@ -391,6 +387,31 @@ write_section_b("4. 팀 구성", """[대표자] 박수현
  - 연세대 심리학과: 공동연구 MOU (임상시험 설계, 효과성 검증)
  - vLLM 커뮤니티: LLM 추론 최적화 기술 자문""")
 
+
+# ==============================================================
+# 20. 일정표 (표20) — 파란색 예시 데이터 교체
+# ==============================================================
+print("\n[일정표]")
+FR("필수 개발 인력 채용", "AI 상담 엔진 개발")
+FR("제품 패키지 디자인", "MuseTalk 아바타 통합")
+FR("홍보용 웹사이트 제작", "베타 서비스 운영")
+FR("시제품 완성", "정식 서비스 출시")
+FR("00.00 ~ 00.00", "2026.04 ~ 2026.06")
+FR("00.00 ~ 00.00", "2026.07 ~ 2026.09")
+FR("00.00 ~ 00.00", "2026.10 ~ 2026.11")
+FR("OO 전공 경력 직원 00명 채용", "NLP 석사 1명, 프론트엔드 1명 채용")
+FR("제품 패키지 디자인 용역 진행", "MuseTalk 아바타 4종 개발 및 STT/TTS 통합")
+FR("웹사이트 자체 제작", "대학 상담센터 3개소 시범 도입")
+FR("협약기간 내 시제품 제작 완료", "앱스토어/플레이스토어 출시, MAU 1,000")
+FR("협약기간 말", "2026.12")
+
+# ==============================================================
+# 21. 사업비표 (표22, 표24) — 파란색 예시 데이터 교체
+# ==============================================================
+print("\n[사업비표]")
+FR("인건비", "인건비")
+FR("재료비", "재료비")
+FR("외주용역비", "외주용역비")
 
 # ==============================================================
 # 검증
