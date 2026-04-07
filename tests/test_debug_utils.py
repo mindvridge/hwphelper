@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.utils import debug_utils
 from src.utils.debug_utils import (
     dump_table_schema,
     setup_logging,
-    test_com_connection,
 )
 
 
@@ -39,7 +39,13 @@ class TestDumpTableSchema:
 
 class TestCOMDiagnostic:
     def test_com_connection_returns_dict(self) -> None:
-        result = test_com_connection()
+        """COM 연결 테스트 — 실제 COM 호출 대신 mock 사용."""
+        mock_ctrl = MagicMock()
+        mock_ctrl.hwp.Version = "12.0"
+
+        with patch("src.hwp_engine.com_controller.HwpController", return_value=mock_ctrl):
+            result = debug_utils.test_com_connection()
+
         assert isinstance(result, dict)
         assert "success" in result
         assert "error" in result

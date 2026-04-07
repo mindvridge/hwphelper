@@ -9,7 +9,7 @@ export function useChat(sessionId: string) {
   const [currentModel, setCurrentModel] = useState<string>("");
   const streamRef = useRef<string>("");
   const toolsRef = useRef<ToolCallInfo[]>([]);
-  const { isConnected, lastMessage, send } = useWebSocket(sessionId);
+  const { isConnected, lastMessage, send, disconnect } = useWebSocket(sessionId);
 
   // ── WebSocket 메시지 처리 ──────────────────────────────
 
@@ -215,12 +215,19 @@ export function useChat(sessionId: string) {
     toolsRef.current = [];
   }, []);
 
+  const stopGeneration = useCallback(() => {
+    send({ type: "stop" });
+    setIsStreaming(false);
+    setProgress(null);
+  }, [send]);
+
   return {
     messages,
     sendMessage,
     sendMessageWithImage,
     addLocalMessage,
     clearMessages,
+    stopGeneration,
     isStreaming,
     isConnected,
     progress,

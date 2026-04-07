@@ -1,16 +1,16 @@
 """템플릿 채우기 — 정부과제 양식의 구조를 인식하고 적절한 위치에 내용을 삽입.
 
-정부과제 양식의 두 가지 패턴:
-
-패턴 A (기업정보 표): 다열 표, "주식회사 0000" 같은 예시값 교체
-패턴 B (서술형 셀): 1셀 표, 내부에 "1)", "2)", "※" 구조 → 안내문 삭제 후 내용 작성
+정부과제 양식 구조:
+  - 본문 표의 B열에 모든 섹션이 하나의 셀로 들어있음
+  - ※ 안내문 (파란색) → 삭제 대상
+  - ◦, - 구조 기호 → 보존하고 뒤에 내용 추가
+  - 섹션 제목 (1. 문제 인식, 2. 실현 가능성...) → 보존
 
 사용법::
 
     filler = TemplateFiller(hwp)
-    sections = filler.analyze_template()
-    # → [{"type": "info", "table_idx": 1, "fields": [...]},
-    #    {"type": "narrative", "table_idx": 6, "title": "① 창업동기", ...}]
+    structure = filler.analyze_template()
+    summary = filler.get_fillable_summary(structure)
 """
 
 from __future__ import annotations
@@ -36,36 +36,68 @@ class InfoField:
 
 
 @dataclass
+class BodySection:
+    """본문 섹션 — 2열 표의 B열."""
+
+    table_idx: int          # 이 섹션이 속한 표 인덱스
+    section_num: int        # 1, 2, 3, 4
+    title: str              # "1. 문제 인식(Problem)_창업 아이템의 필요성"
+    guide_text: str = ""    # "※ 안내문..."
+    markers: list[dict[str, Any]] = field(default_factory=list)
+    # markers: [{"type": "◦" 또는 "-", "para_index": int, "text": "◦" 등}]
+
+
+@dataclass
 class NarrativeSection:
-    """서술형 섹션 (패턴 B)."""
+    """서술형 섹션 (패턴 B) — 하위 호환용."""
 
     table_idx: int
-    title: str       # "① 창업동기" 등
-    sub_items: list[str] = field(default_factory=list)  # ["1)", "2)"]
-    guide_text: str = ""  # "※ 안내문..."
-    full_text: str = ""   # 셀 전체 텍스트
+    title: str
+    sub_items: list[str] = field(default_factory=list)
+    guide_text: str = ""
+    full_text: str = ""
+
+
+@dataclass
+class DataTable:
+    """데이터 표 (예산, 일정 등 다열 구조)."""
+
+    table_idx: int
+    title: str  # 표 제목 (첫 행 또는 헤더에서 추출)
+    headers: list[str] = field(default_factory=list)
+    rows: int = 0
+    cols: int = 0
+    empty_cells: list[dict[str, Any]] = field(default_factory=list)
+    # empty_cells: [{"row": int, "col": int, "header": str}]
 
 
 @dataclass
 class TemplateStructure:
     """양식 전체 구조."""
 
-    info_tables: list[dict[str, Any]] = field(default_factory=list)  # 기업정보 표
-    narrative_sections: list[NarrativeSection] = field(default_factory=list)  # 서술형
-    other_tables: list[int] = field(default_factory=list)  # 기타 표
+    info_tables: list[dict[str, Any]] = field(default_factory=list)
+    narrative_sections: list[NarrativeSection] = field(default_factory=list)
+    other_tables: list[int] = field(default_factory=list)
+    body_sections: list[BodySection] = field(default_factory=list)
+    data_tables: list[DataTable] = field(default_factory=list)
 
 
 # 예시 데이터 패턴 (교체 대상)
 _EXAMPLE_PATTERNS = re.compile(
     r"^("
     r"주식회사\s*0+|"
-    r"0{3,}[-.]?0{2,}[-.]?0{3,}|"  # 000-00-00000
-    r"0{3,}[-.]0{4,}[-.]0{4,}|"    # 010-0000-0000
-    r"20\d{2}[.\s]*0{2}[.\s]*0{2}|"  # 2026.02.12
+    r"0{3,}[-.]?0{2,}[-.]?0{3,}|"
+    r"0{3,}[-.]0{4,}[-.]0{4,}|"
+    r"20\d{2}[.\s]*0{2}[.\s]*0{2}|"
     r"0{2,}|"
     r"\(주\)\s*0+|"
-    r".{0,5}@.{0,5}\..{0,3}"  # 이메일
+    r".{0,5}@.{0,5}\..{0,3}"
     r")$"
+)
+
+# 섹션 제목 패턴
+_SECTION_TITLE = re.compile(
+    r"^\s*(\d+)\.\s*(문제\s*인식|실현\s*가능성|성장\s*전략|팀\s*구성)"
 )
 
 
@@ -74,6 +106,10 @@ class TemplateFiller:
 
     def __init__(self, hwp: Any) -> None:
         self._hwp = hwp
+
+    # ------------------------------------------------------------------
+    # 분석
+    # ------------------------------------------------------------------
 
     def analyze_template(self) -> TemplateStructure:
         """양식 전체를 분석하여 구조를 반환한다."""
@@ -99,11 +135,24 @@ class TemplateFiller:
                     info = self._analyze_info_table(ti, df)
                     if info["fields"]:
                         structure.info_tables.append(info)
-                elif cols_count <= 2:
-                    # 패턴 B: 서술형 셀 (1~2열)
+                    else:
+                        # 기업정보가 아닌 다열 표 (예산, 일정 등)
+                        data_table = self._analyze_data_table(ti, df)
+                        if data_table:
+                            structure.data_tables.append(data_table)
+
+                elif cols_count == 2:
+                    # 2열 표 — 본문 표일 수 있음 (A열=제목, B열=내용)
+                    a_text = str(df.columns[0]).strip()
+                    if _SECTION_TITLE.match(a_text):
+                        self._analyze_body_cell(ti, a_text, structure)
+
+                elif cols_count == 1:
+                    # 1열 표 — 서술형 또는 안내문
                     section = self._analyze_narrative(ti, df)
                     if section:
                         structure.narrative_sections.append(section)
+
                 else:
                     structure.other_tables.append(ti)
 
@@ -113,9 +162,122 @@ class TemplateFiller:
         logger.info(
             "양식 분석 완료",
             info_tables=len(structure.info_tables),
+            data_tables=len(structure.data_tables),
+            body_sections=len(structure.body_sections),
             narratives=len(structure.narrative_sections),
         )
         return structure
+
+    def _analyze_body_cell(self, table_idx: int, title_text: str, structure: TemplateStructure) -> None:
+        """본문 표(2열)의 B1 셀을 단락 단위로 분석한다.
+
+        각 2열 표는 하나의 섹션에 대응:
+          A열 = 제목 ("1. 문제 인식...")
+          B열 = 안내문(※) + 구조 기호(◦, -)
+        """
+        hwp = self._hwp
+        hwp.get_into_nth_table(table_idx)
+        hwp.TableRightCell()  # B1으로 이동
+
+        # 섹션 번호 추출
+        m = _SECTION_TITLE.match(title_text)
+        section_num = int(m.group(1)) if m else 0
+
+        section = BodySection(
+            table_idx=table_idx,
+            section_num=section_num,
+            title=title_text.replace("\r\n", "").replace("\n", ""),
+        )
+
+        # 단락 텍스트 수집
+        paragraphs = self._read_cell_paragraphs()
+
+        for para_idx, text in enumerate(paragraphs):
+            stripped = text.strip()
+            if not stripped:
+                continue
+
+            # 다른 섹션 제목이 나타나면 이 셀의 분석 영역 끝
+            # (병합 셀의 경우 여러 섹션이 연속으로 들어있을 수 있음)
+            m2 = _SECTION_TITLE.match(stripped)
+            if m2 and int(m2.group(1)) != section_num:
+                break
+
+            # ※ 안내문 (첫 번째만)
+            if stripped.startswith("※") and not section.guide_text:
+                section.guide_text = stripped
+                continue
+
+            # ◦/○ 소제목 (빈 마커 또는 짧은 텍스트 포함)
+            if stripped in ("◦", "○") or (
+                (stripped.startswith("◦") or stripped.startswith("○"))
+                and len(stripped) <= 5
+            ):
+                section.markers.append({
+                    "type": "◦",
+                    "para_index": para_idx,
+                    "text": stripped,
+                })
+                continue
+
+            # - 하위항목
+            if stripped == "-" or (stripped.startswith("-") and len(stripped) <= 5):
+                section.markers.append({
+                    "type": "-",
+                    "para_index": para_idx,
+                    "text": stripped,
+                })
+                continue
+
+        # 마커 유무와 관계없이 본문 섹션으로 추가
+        structure.body_sections.append(section)
+
+    def _read_cell_paragraphs(self) -> list[str]:
+        """현재 셀의 모든 단락 텍스트를 반환한다."""
+        hwp = self._hwp
+
+        try:
+            import win32clipboard
+        except ImportError:
+            return []
+
+        hwp.HAction.Run("MoveColBegin")
+        paragraphs: list[str] = []
+        seen_positions: set[tuple[int, ...]] = set()
+
+        for _ in range(500):  # 안전 상한
+            cur_pos = hwp.GetPos()
+            pos_key = tuple(cur_pos) if isinstance(cur_pos, (list, tuple)) else (cur_pos,)
+            if pos_key in seen_positions:
+                break
+            seen_positions.add(pos_key)
+
+            # 단락 끝까지 선택 후 클립보드로 복사
+            hwp.HAction.Run("MoveSelParaEnd")
+            hwp.HAction.Run("Copy")
+
+            try:
+                win32clipboard.OpenClipboard()
+                text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                win32clipboard.CloseClipboard()
+            except Exception:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+                text = ""
+
+            paragraphs.append(text.strip())
+
+            # 다음 단락으로
+            hwp.HAction.Run("MoveParaEnd")
+            hwp.HAction.Run("MoveRight")
+
+        return paragraphs
+
+    # ------------------------------------------------------------------
+    # 채우기
+    # ------------------------------------------------------------------
 
     def fill_info_field(self, table_idx: int, moves: int, text: str) -> None:
         """기업정보 표의 특정 셀에 값을 채운다."""
@@ -124,33 +286,259 @@ class TemplateFiller:
         for _ in range(moves):
             hwp.TableRightCell()
 
-        # 셀 내용 교체
         hwp.HAction.Run("MoveColBegin")
         hwp.HAction.Run("MoveSelColEnd")
         hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
         hwp.HParameterSet.HInsertText.Text = text
         hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
 
+    def fill_body_section(self, table_idx: int, section: BodySection, contents: list[str]) -> None:
+        """본문 B1 셀의 특정 섹션에 내용을 채운다.
+
+        전략: ◦/- 기호가 있는 단락으로 이동하여 기호 뒤에 텍스트를 추가한다.
+        ※ 안내문 단락은 삭제한다.
+        """
+        hwp = self._hwp
+        hwp.get_into_nth_table(table_idx)
+        hwp.TableRightCell()  # B1
+
+        # 1단계: ※ 안내문 삭제
+        self._delete_guide_paragraphs(section)
+
+        # 2단계: ◦/- 마커에 내용 추가
+        # 다시 B1 진입 (안내문 삭제 후 위치가 변경되었을 수 있음)
+        hwp.get_into_nth_table(table_idx)
+        hwp.TableRightCell()
+        self._fill_markers(section, contents)
+
+    def _delete_guide_paragraphs(self, section: BodySection) -> None:
+        """현재 B1 셀에서 해당 섹션의 ※ 안내문 단락을 찾아 삭제한다."""
+        hwp = self._hwp
+
+        if not section.guide_text:
+            return
+
+        # B1 처음부터 순회하며 ※ 안내문 찾기
+        hwp.HAction.Run("MoveColBegin")
+        guide_keyword = section.guide_text[:20]  # 안내문 식별용 앞부분
+
+        try:
+            import win32clipboard
+        except ImportError:
+            return
+
+        seen: set[tuple[int, ...]] = set()
+        for _ in range(500):
+            cur_pos = hwp.GetPos()
+            pos_key = tuple(cur_pos) if isinstance(cur_pos, (list, tuple)) else (cur_pos,)
+            if pos_key in seen:
+                break
+            seen.add(pos_key)
+
+            # 단락 텍스트 읽기
+            hwp.HAction.Run("MoveSelParaEnd")
+            hwp.HAction.Run("Copy")
+
+            try:
+                win32clipboard.OpenClipboard()
+                text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                win32clipboard.CloseClipboard()
+            except Exception:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+                text = ""
+
+            stripped = text.strip()
+
+            if stripped.startswith("※") and guide_keyword[:15] in stripped:
+                # 이 단락 전체를 선택하여 삭제
+                hwp.HAction.Run("MoveParaBegin")
+                hwp.HAction.Run("MoveSelParaEnd")
+                hwp.HAction.Run("MoveSelRight")  # 줄바꿈 포함
+                hwp.HAction.Run("Delete")
+                logger.debug("안내문 삭제", text=stripped[:40])
+                # 삭제 후 위치가 바뀌므로 처음부터 다시 시작
+                hwp.HAction.Run("MoveColBegin")
+                seen.clear()
+                continue
+
+            # 다음 단락으로
+            hwp.HAction.Run("MoveParaEnd")
+            hwp.HAction.Run("MoveRight")
+
+    def _fill_markers(self, section: BodySection, contents: list[str]) -> None:
+        """현재 B1 셀의 ◦/- 마커를 찾아 내용을 채운다.
+
+        각 2열 표의 B1 셀은 해당 섹션 전용이므로
+        바로 ◦/- 마커를 순회한다.
+        """
+        hwp = self._hwp
+
+        if not section.markers or not contents:
+            return
+
+        try:
+            import win32clipboard
+        except ImportError:
+            return
+
+        hwp.HAction.Run("MoveColBegin")
+        content_idx = 0
+        seen: set[tuple[int, ...]] = set()
+
+        for _ in range(500):
+            if content_idx >= len(contents):
+                break
+
+            cur_pos = hwp.GetPos()
+            pos_key = tuple(cur_pos) if isinstance(cur_pos, (list, tuple)) else (cur_pos,)
+            if pos_key in seen:
+                break
+            seen.add(pos_key)
+
+            # 선택 해제 후 단락 텍스트 읽기
+            hwp.HAction.Run("Cancel")
+            hwp.HAction.Run("MoveSelParaEnd")
+            hwp.HAction.Run("Copy")
+
+            try:
+                win32clipboard.OpenClipboard()
+                text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                win32clipboard.CloseClipboard()
+            except Exception:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+                text = ""
+
+            stripped = text.strip()
+
+            # ◦/○ 또는 - 마커 찾기 (길이 5 이하)
+            is_circle = stripped in ("◦", "○") or (
+                (stripped.startswith("◦") or stripped.startswith("○"))
+                and len(stripped) <= 5
+            )
+            is_dash = stripped == "-" or (stripped.startswith("-") and len(stripped) <= 5)
+
+            if is_circle or is_dash:
+                # 단락 끝으로 이동
+                hwp.HAction.Run("MoveParaEnd")
+
+                # 밑줄/취소선 서식 제거
+                self._clear_formatting(hwp)
+
+                # 마커 뒤에 내용 추가
+                content_text = " " + contents[content_idx]
+                hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+                hwp.HParameterSet.HInsertText.Text = content_text
+                hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+
+                marker_type = "◦" if is_circle else "-"
+                logger.debug("마커에 내용 추가", marker=marker_type, content=content_text[:30])
+                content_idx += 1
+
+            # 다음 단락
+            hwp.HAction.Run("MoveParaEnd")
+            hwp.HAction.Run("MoveRight")
+
+        logger.info(
+            "섹션 채우기 완료",
+            section=section.section_num,
+            title=section.title[:30],
+            filled=content_idx,
+            total_markers=len(section.markers),
+        )
+
+    @staticmethod
+    def _clear_formatting(hwp: Any) -> None:
+        """현재 위치의 밑줄/취소선/문단 테두리 서식을 제거한다."""
+        # 1. 글자 서식: 밑줄, 취소선 제거
+        try:
+            act = hwp.HParameterSet.HCharShape
+            hwp.HAction.GetDefault("CharShape", act.HSet)
+            act.UnderlineType = 0   # 밑줄 없음
+            act.StrikeOutType = 0   # 취소선 없음
+            hwp.HAction.Execute("CharShape", act.HSet)
+        except Exception:
+            pass
+
+        # 2. 문단 테두리 제거 (※ 안내문 서식 상속 방지)
+        try:
+            pset = hwp.get_parashape()
+            hwp.HAction.GetDefault("ParaShape", pset.HSet)
+            # 문단 테두리 속성 초기화
+            pset.LeftBorder = 0
+            pset.RightBorder = 0
+            pset.TopBorder = 0
+            pset.BottomBorder = 0
+            pset.ConnectBorder = 0
+            hwp.HAction.Execute("ParaShape", pset.HSet)
+        except Exception:
+            pass
+
+        # 3. 셀 대각선 테두리 제거 (CellBorderFill 사용)
+        try:
+            cbf = hwp.HParameterSet.HCellBorderFill
+            hwp.HAction.GetDefault("CellBorderFill", cbf.HSet)
+            # Diagonal 속성이 있으면 0으로 설정
+            try:
+                cbf.DiagonalType = 0
+            except AttributeError:
+                pass
+            try:
+                cbf.Diagonal = 0
+            except AttributeError:
+                pass
+            hwp.HAction.Execute("CellBorderFill", cbf.HSet)
+        except Exception:
+            pass
+
+    def fill_body_narrative(self, table_idx: int, section: BodySection, content: str) -> None:
+        """마커 없는 본문 섹션의 B1 셀에 내용을 작성한다.
+
+        ※ 안내문을 삭제한 후, 셀의 기존 서식을 유지하면서 내용을 삽입한다.
+        """
+        hwp = self._hwp
+
+        # 1단계: ※ 안내문 삭제
+        hwp.get_into_nth_table(table_idx)
+        hwp.TableRightCell()  # B1
+        self._delete_guide_paragraphs(section)
+
+        # 2단계: B1 셀 전체 선택 → 밑줄 제거 → 내용 교체
+        hwp.get_into_nth_table(table_idx)
+        hwp.TableRightCell()  # B1
+
+        hwp.HAction.Run("MoveColBegin")
+        hwp.HAction.Run("MoveSelColEnd")
+        self._clear_formatting(hwp)
+
+        # 줄 단위로 삽입 (서식 보존)
+        lines = content.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip():
+                hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+                hwp.HParameterSet.HInsertText.Text = line
+                hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+            if i < len(lines) - 1:
+                hwp.HAction.Run("BreakPara")
+
+        logger.info("본문 서술형 채우기 완료", section=section.section_num, title=section.title[:30])
+
     def fill_narrative(self, table_idx: int, content: str) -> None:
         """서술형 셀의 안내문을 삭제하고 내용을 작성한다.
 
-        기존 구조:
-            ① 창업동기
-              1)
-              2)
-            ※ 안내문...
-
-        작성 후:
-            ① 창업동기
-              1) [LLM이 생성한 내용]
-              2) [LLM이 생성한 내용]
+        하위 호환: body_section 방식이 아닌 단순 표에 사용.
         """
         hwp = self._hwp
         hwp.get_into_nth_table(table_idx)
 
-        # 셀 전체 텍스트를 교체
         hwp.HAction.Run("MoveColBegin")
         hwp.HAction.Run("MoveSelColEnd")
+        self._clear_formatting(hwp)
         hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
         hwp.HParameterSet.HInsertText.Text = content
         hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
@@ -168,11 +556,9 @@ class TemplateFiller:
         for ri in range(df.shape[0]):
             all_vals.extend(list(df.iloc[ri].values))
 
-        # 라벨-값 쌍 찾기
         for i, val in enumerate(all_vals):
             s = str(val).strip()
             if _EXAMPLE_PATTERNS.match(s):
-                # 왼쪽에서 라벨 찾기
                 label = ""
                 for j in range(i - 1, -1, -1):
                     candidate = str(all_vals[j]).strip()
@@ -189,8 +575,7 @@ class TemplateFiller:
         return {"table_idx": table_idx, "fields": fields}
 
     def _analyze_narrative(self, table_idx: int, df: Any) -> NarrativeSection | None:
-        """서술형 셀을 분석한다."""
-        # 첫 번째 열의 전체 텍스트
+        """서술형 셀(1열 표)을 분석한다."""
         try:
             full = str(df.columns[0])
             if df.shape[0] > 0:
@@ -203,25 +588,21 @@ class TemplateFiller:
         if not full or len(full) < 5:
             return None
 
-        # 제목 추출 (첫 줄에서 ①, ②, 1., 2. 등)
         lines = full.split("\n")
         title = lines[0].strip() if lines else ""
 
-        # 번호 항목 찾기
         sub_items = []
         for line in lines:
             stripped = line.strip()
             if re.match(r"^\d+\)\s*$", stripped) or re.match(r"^\d+\)\s+\S", stripped):
                 sub_items.append(stripped)
 
-        # 안내문 찾기
         guide = ""
         for line in lines:
             if line.strip().startswith("※"):
                 guide = line.strip()
                 break
 
-        # 서술형 섹션으로 인식하려면 제목이 있어야 함
         if not title:
             return None
 
@@ -232,6 +613,98 @@ class TemplateFiller:
             guide_text=guide,
             full_text=full,
         )
+
+    def _analyze_data_table(self, table_idx: int, df: Any) -> DataTable | None:
+        """다열 데이터 표(예산, 일정 등)를 분석한다.
+
+        예시 데이터(파란색 텍스트 등)가 들어있는 셀과 빈 셀을 모두 감지한다.
+        헤더 행과 합계 행은 제외한다.
+        """
+        rows, cols = df.shape
+        if rows < 1 or cols < 2:
+            return None
+
+        headers = [str(c).strip() for c in df.columns]
+
+        # 표 제목 추정
+        title = headers[0]
+        for candidate in headers:
+            if len(candidate) > 3 and not _EXAMPLE_PATTERNS.match(candidate):
+                title = candidate
+                break
+
+        # 전체 표 데이터를 예시로 수집 (헤더 제외, 합계 제외)
+        example_rows: list[list[str]] = []
+        for ri in range(rows):
+            row_vals = [str(df.iloc[ri, ci]).strip() for ci in range(cols)]
+            first_val = row_vals[0] if row_vals else ""
+            # 합계 행 또는 빈 행("…", "...") 건너뛰기
+            if first_val in ("합  계", "합계", "…", "...", ""):
+                continue
+            example_rows.append(row_vals)
+
+        if not example_rows:
+            return None
+
+        # 모든 데이터 행을 교체 대상으로 설정
+        empty_cells: list[dict[str, Any]] = []
+        for ri_orig in range(rows):
+            row_vals = [str(df.iloc[ri_orig, ci]).strip() for ci in range(cols)]
+            first_val = row_vals[0] if row_vals else ""
+            if first_val in ("합  계", "합계", "…", "...", ""):
+                continue
+            for ci in range(cols):
+                header = headers[ci] if ci < len(headers) else f"col{ci}"
+                empty_cells.append({
+                    "row": ri_orig + 1,  # 1-based (헤더 제외)
+                    "col": ci,
+                    "header": header,
+                    "example": row_vals[ci],
+                })
+
+        return DataTable(
+            table_idx=table_idx,
+            title=title,
+            headers=headers,
+            rows=rows,
+            cols=cols,
+            empty_cells=empty_cells,
+        )
+
+    def fill_data_cell(self, table_idx: int, row: int, col: int, text: str) -> None:
+        """데이터 표의 특정 셀에 값을 채운다.
+
+        row는 DataFrame 기준 (헤더 제외) 1-based, col은 0-based.
+        """
+        hwp = self._hwp
+        hwp.get_into_nth_table(table_idx)
+
+        total_moves = row * self._get_col_count(table_idx) + col
+        for _ in range(total_moves):
+            hwp.TableRightCell()
+
+        hwp.HAction.Run("MoveColBegin")
+        hwp.HAction.Run("MoveSelColEnd")
+
+        # 텍스트 색상을 검정(0x00000000)으로 설정
+        try:
+            act = hwp.HParameterSet.HCharShape
+            hwp.HAction.GetDefault("CharShape", act.HSet)
+            act.TextColor = 0x00000000  # 검정색
+            hwp.HAction.Execute("CharShape", act.HSet)
+        except Exception:
+            pass
+
+        hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+        hwp.HParameterSet.HInsertText.Text = text
+        hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+
+    def _get_col_count(self, table_idx: int) -> int:
+        """표의 열 수를 반환한다."""
+        hwp = self._hwp
+        hwp.get_into_nth_table(table_idx)
+        df = hwp.table_to_df()
+        return df.shape[1]
 
     def get_fillable_summary(self, structure: TemplateStructure) -> list[dict[str, Any]]:
         """채울 수 있는 항목 요약을 반환한다."""
@@ -247,6 +720,24 @@ class TemplateFiller:
                     "index": f["index"],
                 })
 
+        # 본문 섹션 (새로운 방식)
+        for bs in structure.body_sections:
+            marker_count = len(bs.markers)
+            circle_count = len([m for m in bs.markers if m["type"] == "◦"])
+            dash_count = len([m for m in bs.markers if m["type"] == "-"])
+            items.append({
+                "type": "body_section",
+                "table_idx": bs.table_idx,
+                "section_num": bs.section_num,
+                "title": bs.title,
+                "guide": bs.guide_text[:80] if bs.guide_text else "",
+                "markers": bs.markers,
+                "marker_count": marker_count,
+                "circle_count": circle_count,
+                "dash_count": dash_count,
+            })
+
+        # 하위 호환: narrative_sections
         for ns in structure.narrative_sections:
             items.append({
                 "type": "narrative",
@@ -254,6 +745,19 @@ class TemplateFiller:
                 "title": ns.title,
                 "sub_items": ns.sub_items,
                 "guide": ns.guide_text[:50],
+            })
+
+        # 데이터 표 (예산, 일정 등)
+        for dt in structure.data_tables:
+            items.append({
+                "type": "data_table",
+                "table_idx": dt.table_idx,
+                "title": dt.title,
+                "headers": dt.headers,
+                "rows": dt.rows,
+                "cols": dt.cols,
+                "empty_cells": dt.empty_cells,
+                "empty_count": len(dt.empty_cells),
             })
 
         return items

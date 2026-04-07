@@ -7,6 +7,7 @@ WebSocket을 통해 ChatEvent를 스트리밍한다.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -199,7 +200,8 @@ class ChatAgent:
                 # 일반 대화 (도구 없이)
                 messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
                 response = await self.llm.chat(messages=messages, model_id=model_id)
-                assert isinstance(response, LLMResponse)
+                if not isinstance(response, LLMResponse):
+                    raise TypeError(f"Expected LLMResponse, got {type(response)}")
                 if response.content:
                     yield ChatEvent(type="text_delta", data=response.content)
                     history.append({"role": "assistant", "content": response.content})
@@ -242,11 +244,18 @@ class ChatAgent:
         structure, filler = await self._run_com(lambda: _analyze())
         items = filler.get_fillable_summary(structure)
 
+        info_count = len([i for i in items if i["type"] == "info"])
+        body_count = len([i for i in items if i["type"] == "body_section"])
+        narrative_count = len([i for i in items if i["type"] == "narrative"])
+        data_table_count = len([i for i in items if i["type"] == "data_table"])
+
         yield ChatEvent(type="tool_result", data={
             "tool": "analyze_template",
             "result": {
-                "info_fields": len([i for i in items if i["type"] == "info"]),
-                "narrative_sections": len([i for i in items if i["type"] == "narrative"]),
+                "info_fields": info_count,
+                "body_sections": body_count,
+                "narrative_sections": narrative_count,
+                "data_tables": data_table_count,
                 "total": len(items),
             },
         })
@@ -257,7 +266,16 @@ class ChatAgent:
             return
 
         total = len(items)
-        yield ChatEvent(type="text_delta", data=f"기업정보 {len([i for i in items if i['type']=='info'])}개, 서술항목 {len([i for i in items if i['type']=='narrative'])}개 발견. 작성을 시작합니다...\n\n")
+        parts = []
+        if info_count:
+            parts.append(f"기업정보 {info_count}개")
+        if body_count:
+            parts.append(f"본문섹션 {body_count}개")
+        if narrative_count:
+            parts.append(f"서술항목 {narrative_count}개")
+        if data_table_count:
+            parts.append(f"데이터표 {data_table_count}개")
+        yield ChatEvent(type="text_delta", data=f"{', '.join(parts)} 발견. 작성을 시작합니다...\n\n")
 
         # 2단계: 항목별 LLM 생성 → 적절한 위치에 쓰기
         wrote = 0
@@ -280,15 +298,110 @@ class ChatAgent:
                         messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
                         model_id=model_id,
                     )
-                    assert isinstance(resp, LLMResponse)
+                    if not isinstance(resp, LLMResponse):
+                        continue
                     value = resp.content.strip().strip('"').strip("'")
                     if value and len(value) > 1:
-                        await self._run_com(lambda: filler.fill_info_field(item["table_idx"], item["index"], value))
+                        await self._run_com(lambda t=item["table_idx"], i=item["index"], v=value: filler.fill_info_field(t, i, v))
                         wrote += 1
                         yield ChatEvent(type="tool_result", data={"tool": "fill_info", "result": {"label": item["label"], "value": value}})
 
+                elif item["type"] == "body_section":
+                    # 본문 섹션: ◦/- 마커 유무에 따라 다른 전략
+                    markers = item.get("markers", [])
+                    marker_count = len(markers)
+
+                    from src.hwp_engine.template_filler import BodySection
+                    bs = BodySection(
+                        section_num=item["section_num"],
+                        title=item["title"],
+                        guide_text=item.get("guide", ""),
+                        markers=markers,
+                        table_idx=item["table_idx"],
+                    )
+
+                    if marker_count > 0:
+                        # 마커 있음: ◦/- 구조에 맞춰 내용 생성
+                        marker_desc = []
+                        for m in markers:
+                            marker_desc.append(f"  {m['type']}")
+                        marker_structure = "\n".join(marker_desc)
+
+                        prompt = (
+                            f"정부사업 계획서의 '{item['title']}' 섹션을 작성하세요.\n"
+                        )
+                        if item.get("guide"):
+                            prompt += f"평가기준: {item['guide']}\n"
+                        prompt += f"\n사용자 정보: {user_message}\n"
+                        prompt += (
+                            f"\n원본 양식에 {marker_count}개의 빈 항목이 있습니다.\n"
+                            f"구조:\n{marker_structure}\n"
+                            f"\n정확히 {marker_count}개의 항목 내용을 작성하세요.\n"
+                            f"각 항목은 줄바꿈(\\n)으로 구분하세요.\n"
+                            f"◦ 항목은 소제목(핵심 키워드 1~2줄), - 항목은 세부 설명(2~4줄)입니다.\n"
+                            f"◦, - 기호는 포함하지 마세요. 내용만 작성하세요.\n"
+                            f"※ 안내문, 마크다운, 따옴표 금지."
+                        )
+                        resp = await self.llm.chat(
+                            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                            model_id=model_id,
+                        )
+                        if not isinstance(resp, LLMResponse):
+                            continue
+                        raw = resp.content.strip().strip('"')
+                        lines = [l.strip() for l in raw.split("\n") if l.strip()]
+                        contents_list = []
+                        for l in lines:
+                            cleaned = re.sub(r"^[◦○\-]\s*", "", l).strip()
+                            if cleaned:
+                                contents_list.append(cleaned)
+
+                        if contents_list:
+                            await self._run_com(
+                                lambda t=item["table_idx"], s=bs, c=contents_list: filler.fill_body_section(t, s, c)
+                            )
+                            wrote += 1
+                            yield ChatEvent(type="tool_result", data={
+                                "tool": "fill_body_section",
+                                "result": {"title": item["title"], "filled": len(contents_list)},
+                            })
+                    else:
+                        # 마커 없음: ※ 안내문 삭제 후 서술형으로 내용 작성
+                        prompt = (
+                            f"정부사업 계획서의 '{item['title']}' 섹션을 작성하세요.\n"
+                        )
+                        if item.get("guide"):
+                            prompt += f"평가기준: {item['guide']}\n"
+                        prompt += f"\n사용자 정보: {user_message}\n"
+                        prompt += (
+                            f"\n다음 형식으로 작성하세요:\n"
+                            f"◦ [소제목1]\n"
+                            f"  - [세부 설명 2~4줄]\n"
+                            f"◦ [소제목2]\n"
+                            f"  - [세부 설명 2~4줄]\n"
+                            f"\n3~5개의 소제목(◦)과 각각의 세부 설명(-)을 작성하세요.\n"
+                            f"※ 안내문은 포함하지 마세요. 마크다운 금지."
+                        )
+                        resp = await self.llm.chat(
+                            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                            model_id=model_id,
+                        )
+                        if not isinstance(resp, LLMResponse):
+                            continue
+                        content = resp.content.strip().strip('"')
+                        if content and len(content) > 10:
+                            await self._run_com(
+                                lambda t=item["table_idx"], s=bs, c=content: filler.fill_body_narrative(t, s, c)
+                            )
+                            wrote += 1
+                            yield ChatEvent(type="tool_result", data={
+                                "tool": "fill_body_narrative",
+                                "result": {"title": item["title"]},
+                            })
+                        yield ChatEvent(type="document_updated", data={"tool": "fill_body_section"})
+
                 elif item["type"] == "narrative":
-                    # 서술형: 제목 유지 + 내용 생성
+                    # 서술형 (하위 호환): 제목 유지 + 내용 생성
                     sub_labels = ", ".join(item.get("sub_items", []))
                     prompt = (
                         f"정부사업 계획서의 '{item['title']}' 섹션을 작성하세요.\n"
@@ -309,13 +422,69 @@ class ChatAgent:
                         messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
                         model_id=model_id,
                     )
-                    assert isinstance(resp, LLMResponse)
+                    if not isinstance(resp, LLMResponse):
+                        continue
                     content = resp.content.strip().strip('"')
                     if content and len(content) > 10:
-                        await self._run_com(lambda c=content: filler.fill_narrative(item["table_idx"], c))
+                        await self._run_com(lambda t=item["table_idx"], c=content: filler.fill_narrative(t, c))
                         wrote += 1
                         yield ChatEvent(type="tool_result", data={"tool": "fill_narrative", "result": {"title": item["title"]}})
                         yield ChatEvent(type="document_updated", data={"tool": "fill_narrative"})
+
+                elif item["type"] == "data_table":
+                    # 데이터 표 (예산, 일정 등): 예시 데이터를 사용자 정보로 교체
+                    empty_cells = item.get("empty_cells", [])
+                    headers = item.get("headers", [])
+                    if not empty_cells:
+                        continue
+
+                    # 표 구조와 예시 데이터 설명
+                    header_desc = " | ".join(headers)
+                    prompt = (
+                        f"정부사업 계획서의 '{item['title']}' 표를 작성하세요.\n"
+                        f"표 열: {header_desc}\n"
+                        f"\n현재 예시 데이터를 사용자 정보에 맞게 교체하세요.\n"
+                        f"\n사용자 정보: {user_message}\n"
+                        f"\n교체할 셀 목록 (행, 열이름, 현재 예시값):\n"
+                    )
+                    for ec in empty_cells:
+                        example = ec.get("example", "")
+                        prompt += f"  - 행{ec['row']}, '{ec['header']}': {example}\n"
+                    prompt += (
+                        f"\n정확히 {len(empty_cells)}개의 값을 줄바꿈으로 구분하여 작성하세요.\n"
+                        f"순서대로 각 셀에 들어갈 값만 작성하세요.\n"
+                        f"예산이면 산출근거(•항목명(수량×단가))와 금액을,\n"
+                        f"일정이면 구체적 내용과 기간을 작성하세요.\n"
+                        f"예시와 동일한 형식으로 작성하세요.\n"
+                        f"따옴표, 마크다운, 설명 금지. 값만 작성."
+                    )
+                    resp = await self.llm.chat(
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                        model_id=model_id,
+                    )
+                    if not isinstance(resp, LLMResponse):
+                        continue
+                    raw = resp.content.strip().strip('"')
+                    values = [l.strip() for l in raw.split("\n") if l.strip()]
+
+                    filled_count = 0
+                    for vi, ec in enumerate(empty_cells):
+                        if vi >= len(values):
+                            break
+                        val = values[vi]
+                        if val:
+                            await self._run_com(
+                                lambda t=item["table_idx"], r=ec["row"], c=ec["col"], v=val: filler.fill_data_cell(t, r, c, v)
+                            )
+                            filled_count += 1
+
+                    if filled_count:
+                        wrote += 1
+                        yield ChatEvent(type="tool_result", data={
+                            "tool": "fill_data_table",
+                            "result": {"title": item["title"], "filled": filled_count, "total": len(empty_cells)},
+                        })
+                        yield ChatEvent(type="document_updated", data={"tool": "fill_data_table"})
 
             except Exception as e:
                 logger.warning("항목 작성 실패", item=item.get("title", item.get("label", "")), error=str(e))
@@ -333,7 +502,7 @@ class ChatAgent:
     async def _run_com(self, func: Any, *args: Any) -> Any:
         """COM 작업을 전용 스레드에서 실행한다."""
         import asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         if self.com_executor:
             return await loop.run_in_executor(self.com_executor, func, *args)
         return func(*args)

@@ -11,6 +11,7 @@ interface Props {
   onSendWithImage?: (message: string, imageDataUrl: string) => void;
   onLocalMessage?: (role: "user" | "assistant", content: string) => void;
   onFileUpload?: (data: FileUploadResponse) => void;
+  onStop?: () => void;
   hasHwpSession: boolean;
   isStreaming: boolean;
   progress: ProgressInfo | null;
@@ -22,6 +23,7 @@ export default function ChatPanel({
   onSendWithImage,
   onLocalMessage,
   onFileUpload,
+  onStop,
   hasHwpSession,
   isStreaming,
   progress,
@@ -76,6 +78,7 @@ export default function ChatPanel({
         onSendWithImage={onSendWithImage}
         onLocalMessage={onLocalMessage}
         onFileUpload={onFileUpload}
+        onStop={onStop}
         hasHwpSession={hasHwpSession}
         isStreaming={isStreaming}
       />

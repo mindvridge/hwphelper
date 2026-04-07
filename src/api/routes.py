@@ -71,7 +71,9 @@ async def upload_document(request: Request, file: UploadFile = File(...)) -> Fil
     # 파일 저장
     upload_dir = Path("./uploads")
     upload_dir.mkdir(exist_ok=True)
-    filename = file.filename or "unknown.hwp"
+    raw_filename = file.filename or "unknown.hwp"
+    # 경로 탐색 방지: 파일명만 추출
+    filename = Path(raw_filename).name
     temp_path = upload_dir / filename
     content = await file.read()
     temp_path.write_bytes(content)

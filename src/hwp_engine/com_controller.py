@@ -341,7 +341,21 @@ class HwpController:
 
     def get_para_shape(self) -> dict[str, Any]:
         """현재 커서 위치의 문단 모양을 가져온다."""
+        # pyhwpx의 ParaShape 프로퍼티 우선 시도
+        try:
+            ps = self.hwp.ParaShape
+            return {
+                "alignment": ps.Item("Alignment"),
+                "line_spacing_type": ps.Item("LineSpacingType"),
+                "line_spacing": ps.Item("LineSpacing"),
+            }
+        except Exception:
+            pass
+
+        # 폴백: CreateAction
         act = self.hwp.CreateAction("ParaShape")
+        if act is None:
+            return {"alignment": 1, "line_spacing_type": 0, "line_spacing": 160}
         param = act.CreateSet()
         act.GetDefault(param)
         return {

@@ -163,55 +163,77 @@ class TableReader:
     def read_table(self, table_idx: int) -> Table:
         """지정된 인덱스의 표를 읽어 Table 객체로 반환한다.
 
-        pyhwpx의 get_into_nth_table + TableRightCell로 순회.
+        표를 블록 선택 후 HWPML XML로 내보내서 파싱한다.
+        GetTextFile/GetText 기반 셀 읽기는 한/글 COM에서
+        표 내부에서 신뢰할 수 없으므로, XML 파싱 방식을 사용한다.
         """
+        import xml.etree.ElementTree as ET
+
         hwp = self._ctrl.hwp
 
-        # 표 진입 (A1)
-        hwp.get_into_nth_table(table_idx)
+        # 표 블록 선택 → HWPML XML 내보내기
+        hwp.get_into_nth_table(table_idx, select_cell=True)
+        hwp.TableCellBlockExtend()
+        hwp.TableCellBlockExtendAbs()
+        xml_data = hwp.GetTextFile("HWPML2X", "saveblock")
+        hwp.Cancel()
 
-        # 열 수 파악: A1에서 오른쪽으로 이동하며 행 번호 변화 감지
-        cols = 1
-        start_row = self._addr_row(hwp.get_cell_addr())
-        for _ in range(100):
-            hwp.TableRightCell()
-            addr = hwp.get_cell_addr()
-            if self._addr_row(addr) != start_row:
-                break
-            cols += 1
+        if not xml_data:
+            raise ValueError(f"표 {table_idx}의 XML 데이터를 가져올 수 없습니다.")
 
-        # 다시 처음으로
-        hwp.get_into_nth_table(table_idx)
+        # XML 파싱
+        root = ET.fromstring(xml_data)
+        ns = ""
+        # 네임스페이스 추출
+        if root.tag.startswith("{"):
+            ns = root.tag.split("}")[0] + "}"
 
-        # 전체 셀 순회
+        table_el = root.find(f".//{ns}TABLE")
+        if table_el is None:
+            raise ValueError(f"표 {table_idx}의 XML에서 TABLE 요소를 찾을 수 없습니다.")
+
+        total_rows = int(table_el.attrib.get("RowCount", "0"))
+        total_cols = int(table_el.attrib.get("ColCount", "0"))
+
+        # ROW/CELL 순회
         cells: list[Cell] = []
-        max_row = 0
-        prev_addr = ""
-        for _ in range(5000):  # 안전 상한
-            addr = hwp.get_cell_addr()
-            if addr == prev_addr and len(cells) > 0:
-                break  # 더 이상 이동 안 됨
-            prev_addr = addr
+        for row_idx, row_el in enumerate(table_el.findall(f"{ns}ROW")):
+            for cell_el in row_el.findall(f"{ns}CELL"):
+                col_idx = int(cell_el.attrib.get("ColAddr", "0"))
+                row_span = int(cell_el.attrib.get("RowSpan", "1"))
+                col_span = int(cell_el.attrib.get("ColSpan", "1"))
 
-            r = self._addr_row(addr) - 1  # 1-based → 0-based
-            c = self._addr_col(addr)
-            max_row = max(max_row, r)
+                # 텍스트 추출: CELL 하위의 모든 TEXT/CHAR 요소
+                text_parts: list[str] = []
+                for text_el in cell_el.iter():
+                    if text_el.tag.endswith("CHAR") or text_el.tag.endswith("T"):
+                        if text_el.text:
+                            text_parts.append(text_el.text)
+                text = "\n".join(text_parts).strip()
 
-            # 텍스트 읽기
-            text = self._read_cell_text_native(hwp)
+                # 스타일 추출: 셀에 진입하여 읽기
+                style = None
 
-            # 스타일 읽기
+                cells.append(Cell(
+                    row=row_idx,
+                    col=col_idx,
+                    row_span=row_span,
+                    col_span=col_span,
+                    text=text,
+                    style=style,
+                ))
+
+        # 스타일은 첫 셀에서만 대표로 읽기 (성능)
+        try:
+            hwp.get_into_nth_table(table_idx)
             style = self._read_current_cell_style()
+            if cells and style:
+                cells[0].style = style
+        except Exception:
+            pass
 
-            cells.append(cell)
-
-            # 다음 셀로 이동
-            hwp.TableRightCell()
-
-        rows = max_row + 1
-        table = Table(table_idx=table_idx, rows=rows, cols=cols, cells=cells)
-
-        logger.info("표 읽기 완료", table_idx=table_idx, rows=rows, cols=cols, cells=len(cells))
+        table = Table(table_idx=table_idx, rows=total_rows, cols=total_cols, cells=cells)
+        logger.info("표 읽기 완료", table_idx=table_idx, rows=total_rows, cols=total_cols, cells=len(cells))
         return table
 
     def read_all_tables(self) -> list[Table]:
@@ -237,14 +259,18 @@ class TableReader:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _addr_row(addr: str) -> int:
+    def _addr_row(addr: str | bool | None) -> int:
         """셀 주소에서 행 번호 추출. 'A1' → 1, 'C3' → 3"""
+        if not isinstance(addr, str):
+            return 0
         digits = "".join(c for c in addr if c.isdigit())
         return int(digits) if digits else 0
 
     @staticmethod
-    def _addr_col(addr: str) -> int:
+    def _addr_col(addr: str | bool | None) -> int:
         """셀 주소에서 열 인덱스 추출. 'A1' → 0, 'B1' → 1, 'AA1' → 26"""
+        if not isinstance(addr, str):
+            return 0
         letters = "".join(c for c in addr if c.isalpha())
         col = 0
         for ch in letters.upper():
@@ -365,7 +391,7 @@ class TableReader:
         hwp = self._ctrl.hwp
         try:
             self._move_to_table(table_idx)
-            _, cols = 0, 1
+            cols = 1
             tbl = self._get_table_ctrl(table_idx)
             if tbl:
                 _, cols = self._get_table_size(tbl)
@@ -411,18 +437,24 @@ class TableReader:
             char = self._ctrl.get_char_shape()
             para = self._ctrl.get_para_shape()
 
-            alignment_raw = para.get("alignment", 1)
-            alignment = _ALIGNMENT_MAP.get(alignment_raw, "left") if isinstance(alignment_raw, int) else str(alignment_raw)
+            alignment_raw = para.get("alignment")
+            if isinstance(alignment_raw, int):
+                alignment = _ALIGNMENT_MAP.get(alignment_raw, "left")
+            else:
+                alignment = "left"
+
+            char_spacing = char.get("char_spacing")
+            line_spacing = para.get("line_spacing")
 
             return CellStyle(
-                font_name=str(char.get("font_name", "")),
-                font_size=float(char.get("font_size", 10.0)),
+                font_name=str(char.get("font_name") or ""),
+                font_size=float(char.get("font_size") or 10.0),
                 bold=bool(char.get("bold", False)),
                 italic=bool(char.get("italic", False)),
-                char_spacing=float(char.get("char_spacing", 0)),
-                line_spacing=float(para.get("line_spacing", 160)),
+                char_spacing=float(char_spacing) if char_spacing is not None else 0.0,
+                line_spacing=float(line_spacing) if line_spacing is not None else 160.0,
                 alignment=alignment,
-                text_color=str(char.get("text_color", "0x00000000")),
+                text_color=str(char.get("text_color") or "0x00000000"),
             )
         except Exception:
             logger.debug("셀 스타일 읽기 실패, 기본값 반환")

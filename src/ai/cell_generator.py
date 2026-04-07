@@ -61,7 +61,8 @@ class CellGenerator:
         ]
 
         response = await self._router.chat(messages, model_id=model_id)
-        assert isinstance(response, LLMResponse)
+        if not isinstance(response, LLMResponse):
+            raise TypeError(f"Expected LLMResponse, got {type(response)}")
 
         content = response.content.strip()
         # 따옴표 제거 (LLM이 따옴표로 감싸는 경우)
@@ -96,7 +97,8 @@ class CellGenerator:
         ]
 
         response = await self._router.chat(messages, model_id=model_id, max_tokens=8192)
-        assert isinstance(response, LLMResponse)
+        if not isinstance(response, LLMResponse):
+            raise TypeError(f"Expected LLMResponse, got {type(response)}")
 
         fills = self._parse_batch_response(response.content)
         logger.info("배치 생성 완료", requested=len(cells), generated=len(fills))
@@ -161,8 +163,8 @@ class CellGenerator:
                         col=cell["col"],
                         text=content,
                     )
-                except Exception:
-                    logger.warning("셀 생성 실패", row=cell["row"], col=cell["col"])
+                except Exception as exc:
+                    logger.warning("셀 생성 실패", row=cell["row"], col=cell["col"], error=str(exc))
                     completed += 1
                     return None
 

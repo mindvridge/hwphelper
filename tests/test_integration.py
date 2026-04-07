@@ -160,14 +160,26 @@ class TestLLMRouterOpenAI:
 
         router = LLMRouter(str(cfg_path))
 
-        mock_msg = MagicMock(content="로컬 모델 응답", tool_calls=None)
-        mock_choice = MagicMock(message=mock_msg)
-        mock_resp = MagicMock(choices=[mock_choice], usage=MagicMock(prompt_tokens=5, completion_tokens=3))
+        # httpx mock: post()가 AsyncMock이어야 함
+        mock_http_response = MagicMock()
+        mock_http_response.raise_for_status = MagicMock()
+        mock_http_response.json.return_value = {
+            "choices": [{"message": {"content": "로컬 모델 응답", "tool_calls": None}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+        }
 
-        mock_client = AsyncMock()
-        mock_client.chat.completions.create = AsyncMock(return_value=mock_resp)
+        mock_httpx = AsyncMock()
+        mock_httpx.post = AsyncMock(return_value=mock_http_response)
 
-        with patch.object(router, "_get_client", return_value=(mock_client, {"provider": "openai_compatible", "model": "local-test"})):
+        client_info = {
+            "provider": "openai_compatible",
+            "model": "local-test",
+            "_httpx": mock_httpx,
+            "_base_url": "http://localhost:8000/v1",
+            "_api_key": "none",
+        }
+
+        with patch.object(router, "_get_client", return_value=(client_info, {"provider": "openai_compatible", "model": "local-test"})):
             resp = await router.chat([{"role": "user", "content": "테스트"}], model_id="test-local")
 
         assert isinstance(resp, LLMResponse)

@@ -89,38 +89,36 @@ class TestProcessMessage:
         assert "안녕하세요" in text_ev.data
 
     @pytest.mark.asyncio
-    async def test_tool_call_response(self, agent: ChatAgent, mock_router, mock_doc_mgr) -> None:
-        """도구 호출 포함 응답."""
-        # 첫 호출: 도구 호출
-        tool_response = LLMResponse(
-            content="",
-            tool_calls=[ToolCall(id="tc1", name="get_document_info", arguments={})],
-            model="test",
-        )
-        # 두 번째 호출: 텍스트 응답
-        text_response = LLMResponse(
-            content="문서에 표가 3개 있습니다.",
-            tool_calls=[],
-            model="test",
-        )
-        mock_router.chat = AsyncMock(side_effect=[tool_response, text_response])
-
+    async def test_auto_fill_pipeline(self, agent: ChatAgent, mock_router, mock_doc_mgr) -> None:
+        """자동 채우기 파이프라인이 tool_start/tool_result 이벤트를 생성하는지 확인."""
         # 세션 mock
         mock_session = MagicMock()
         mock_session.session_id = "s1"
         mock_session.hwp_ctrl = MagicMock()
+        mock_session.hwp_ctrl.hwp = MagicMock()
         mock_session.hwp_ctrl.file_path = "test.hwp"
         mock_session.snapshots = []
         mock_doc_mgr.get_session.return_value = mock_session
 
-        # TableReader mock
-        with patch("src.ai.chat_agent.TableReader") as mock_reader_cls:
-            mock_reader = MagicMock()
-            mock_reader.get_table_count.return_value = 3
-            mock_reader_cls.return_value = mock_reader
+        # LLM 응답 mock (info 항목용)
+        mock_router.chat = AsyncMock(return_value=LLMResponse(
+            content="테스트 기업명",
+            tool_calls=[],
+            model="test",
+        ))
+
+        # TemplateFiller mock
+        with patch("src.ai.chat_agent.TemplateFiller") as mock_filler_cls:
+            mock_filler = MagicMock()
+            mock_filler.analyze_template.return_value = {"tables": []}
+            mock_filler.get_fillable_summary.return_value = [
+                {"type": "info", "label": "기업명", "example": "(주)테스트", "table_idx": 0, "index": 0},
+            ]
+            mock_filler.fill_info_field.return_value = True
+            mock_filler_cls.return_value = mock_filler
 
             events = []
-            async for ev in agent.process_message("s1", "문서 정보 알려줘"):
+            async for ev in agent.process_message("s1", "빈 셀 채워줘"):
                 events.append(ev)
 
         types = [e.type for e in events]

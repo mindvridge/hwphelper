@@ -43,6 +43,7 @@ export default function App() {
           onSendWithImage={chat.sendMessageWithImage}
           onLocalMessage={chat.addLocalMessage}
           onFileUpload={handleFileUpload}
+          onStop={chat.stopGeneration}
           hasHwpSession={!!sessionId}
           isStreaming={chat.isStreaming}
           progress={chat.progress}
