@@ -77,8 +77,14 @@ class HwpController:
             if self._security_module:
                 self._register_security_module()
 
-        # 모든 경로 공통: 찾기/바꾸기 등 일반 팝업 자동 처리
+        # 모든 경로 공통: 팝업 자동 처리
         self._set_default_msgbox_mode()
+
+        # pyhwpx의 FindCtrl/find_ctrl 호출 전에 항상 모드를 복원하도록 패치.
+        # pyhwpx 내부 메서드(get_into_nth_table 등)가 FindCtrl을 호출하는데,
+        # 이전에 실행된 find/replace 등이 0xFFFFF로 리셋해버릴 수 있다.
+        if self._via_pyhwpx:
+            self._patch_find_ctrl()
 
     def _set_default_msgbox_mode(self) -> None:
         """모든 팝업을 자동 처리하도록 설정한다.
@@ -97,6 +103,18 @@ class HwpController:
             self._hwp.SetMessageBoxMode(0x11011)
         except Exception:
             pass
+
+    def _patch_find_ctrl(self) -> None:
+        """pyhwpx의 find_ctrl을 래핑하여 호출 전 SetMessageBoxMode를 복원한다."""
+        hwp_obj = self._hwp
+        original = hwp_obj.find_ctrl
+
+        def _patched_find_ctrl():
+            hwp_obj.SetMessageBoxMode(0x11011)
+            return original()
+
+        hwp_obj.find_ctrl = _patched_find_ctrl
+        hwp_obj.FindCtrl = _patched_find_ctrl
 
     def _suppress_security_popups(self) -> None:
         """win32com 직접 연결 시 보안 관련 추가 설정을 적용한다."""
