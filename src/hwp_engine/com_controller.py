@@ -105,16 +105,44 @@ class HwpController:
             pass
 
     def _patch_find_ctrl(self) -> None:
-        """pyhwpx의 find_ctrl을 래핑하여 호출 전 SetMessageBoxMode를 복원한다."""
-        hwp_obj = self._hwp
-        original = hwp_obj.find_ctrl
+        """pyhwpx의 get_into_nth_table을 FindCtrl 없는 버전으로 교체한다.
 
-        def _patched_find_ctrl():
-            hwp_obj.SetMessageBoxMode(0x11011)
-            return original()
+        원래 pyhwpx 구현은 ``self.hwp.FindCtrl()`` (COM) 을 호출하는데,
+        문서 끝에서 '처음부터 찾을까요?' 팝업이 뜨고
+        SetMessageBoxMode로도 안정적으로 억제할 수 없다.
+        HeadCtrl/LastCtrl 순회 → SetPosBySet → SelectCtrlFront로
+        대체하면 FindCtrl 호출 없이 동일하게 동작한다.
+        """
+        hwp_obj = self._hwp  # pyhwpx Hwp 인스턴스
 
-        hwp_obj.find_ctrl = _patched_find_ctrl
-        hwp_obj.FindCtrl = _patched_find_ctrl
+        def _get_into_nth_table(n: int = 0, select_cell: bool = False):
+            com = hwp_obj.hwp  # 실제 COM 객체
+
+            if n >= 0:
+                idx = 0
+                ctrl = com.HeadCtrl
+                forward = True
+            else:
+                idx = -1
+                ctrl = com.LastCtrl
+                forward = False
+
+            while ctrl:
+                if ctrl.UserDesc == "표":
+                    if idx == n:
+                        hwp_obj.set_pos_by_set(ctrl.GetAnchorPos(0))
+                        # FindCtrl 대신 SelectCtrlFront 사용
+                        hwp_obj.HAction.Run("SelectCtrlFront")
+                        hwp_obj.ShapeObjTableSelCell()
+                        if not select_cell:
+                            hwp_obj.Cancel()
+                        return ctrl
+                    idx += 1 if forward else -1
+                ctrl = ctrl.Next if forward else ctrl.Prev
+
+            return False
+
+        hwp_obj.get_into_nth_table = _get_into_nth_table
 
     def _suppress_security_popups(self) -> None:
         """win32com 직접 연결 시 보안 관련 추가 설정을 적용한다."""
