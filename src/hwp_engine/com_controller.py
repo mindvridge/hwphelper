@@ -54,32 +54,43 @@ class HwpController:
             return
 
         try:
-            # pyhwpx 우선 시도
             from pyhwpx import Hwp
-
             self._hwp = Hwp(visible=self._visible)
             logger.info("한/글 COM 연결 (pyhwpx)")
         except Exception:
-            # 직접 COM dispatch 폴백
             if win32 is None:
-                raise RuntimeError(
-                    "pywin32가 설치되어 있지 않습니다. "
-                    "pip install pywin32 후 다시 시도하세요."
-                )
+                raise RuntimeError("pywin32가 설치되어 있지 않습니다.")
             try:
                 self._hwp = win32.gencache.EnsureDispatch("HWPFrame.HwpObject")
-                logger.info("한/글 COM 연결 (win32com)")
             except Exception:
                 self._hwp = win32.Dispatch("HWPFrame.HwpObject")
-                logger.info("한/글 COM 연결 (win32com Dispatch)")
-
-            # 창 표시 여부
             if not self._visible:
                 self._hwp.XHwpWindows.Active = False
+            logger.info("한/글 COM 연결 (win32com)")
 
-        # 보안 모듈 등록 (파일 경로 접근 허용)
+        # 보안 팝업 자동 승인 설정
+        self._suppress_security_popups()
+
+        # 보안 모듈 등록
         if self._security_module:
             self._register_security_module()
+
+    def _suppress_security_popups(self) -> None:
+        """한/글의 보안/경고 팝업을 자동 승인으로 설정한다."""
+        try:
+            # SetMessageBoxMode: 모든 메시지 박스에 자동으로 "예"를 선택
+            # 0x10000: MB_OK 자동 승인
+            # 0x20000: MB_YESNO에서 "예" 자동 선택
+            self._hwp.SetMessageBoxMode(0x10000 | 0x20000)
+            logger.debug("팝업 자동 승인 설정 완료")
+        except Exception:
+            pass
+
+        try:
+            # 파일 접근 보안 경고 비활성화
+            self._hwp.XHwpDocuments.XHwpOptions.SetFileAccessControl(0)
+        except Exception:
+            pass
 
     def _register_security_module(self) -> None:
         """한/글 보안 모듈을 등록하여 자동화 접근을 허용한다."""
@@ -87,7 +98,7 @@ class HwpController:
             self._hwp.RegisterModule("FilePathCheckerModuleExample", "FilePathCheckerModule")
             logger.debug("보안 모듈 등록 완료")
         except Exception:
-            logger.debug("보안 모듈 등록 스킵 (이미 등록되었거나 불필요)")
+            logger.debug("보안 모듈 등록 스킵")
 
     @property
     def hwp(self) -> Any:
@@ -111,7 +122,9 @@ class HwpController:
         if not Path(abs_path).exists():
             raise FileNotFoundError(f"파일을 찾을 수 없습니다: {abs_path}")
 
-        self.hwp.Open(abs_path)
+        # 파일 열기 전 팝업 자동 승인 재설정
+        self._suppress_security_popups()
+        self.hwp.Open(abs_path, "HWP", "forceopen:true")
         self._file_path = abs_path
         logger.info("문서 열기 완료", path=abs_path)
 
