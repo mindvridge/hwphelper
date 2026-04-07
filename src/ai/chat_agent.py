@@ -19,6 +19,7 @@ from src.hwp_engine.document_manager import DocumentManager
 from src.hwp_engine.field_manager import FieldManager
 from src.hwp_engine.schema_generator import SchemaGenerator
 from src.hwp_engine.table_reader import TableReader
+from src.hwp_engine.template_filler import TemplateFiller
 
 from .llm_router import LLMResponse, LLMRouter, ToolCall
 from .tool_definitions import DOCUMENT_MODIFYING_TOOLS, HWP_TOOLS
@@ -216,10 +217,9 @@ class ChatAgent:
     async def _auto_fill_pipeline(
         self, session_id: str, user_message: str, model_id: str | None,
     ) -> AsyncIterator[ChatEvent]:
-        """코드가 직접 분석 → LLM 생성 → COM 쓰기를 수행."""
-        # 중복 실행 방지
+        """양식 구조를 인식하여 적절한 위치에 내용을 삽입한다."""
         if session_id in self._filling_in_progress:
-            yield ChatEvent(type="text_delta", data="이미 자동 채우기가 진행 중입니다. 완료될 때까지 기다려주세요.")
+            yield ChatEvent(type="text_delta", data="이미 자동 채우기가 진행 중입니다.")
             return
         self._filling_in_progress.add(session_id)
 
@@ -227,78 +227,102 @@ class ChatAgent:
             session = self.doc_mgr.get_session(session_id)
         except KeyError:
             self._filling_in_progress.discard(session_id)
-            yield ChatEvent(type="text_delta", data="문서 세션을 찾을 수 없습니다. HWP 파일을 먼저 업로드해주세요.")
+            yield ChatEvent(type="text_delta", data="HWP 파일을 먼저 업로드해주세요.")
             return
 
-        ctrl = session.hwp_ctrl
+        hwp = session.hwp_ctrl.hwp
 
-        # 1단계: 분석
-        yield ChatEvent(type="tool_start", data={"tool": "analyze_document", "args": {}})
-        analysis = await self._run_com(self._tool_analyze_sync, ctrl, session)
-        yield ChatEvent(type="tool_result", data={"tool": "analyze_document", "result": analysis})
+        # 1단계: 양식 구조 분석
+        yield ChatEvent(type="tool_start", data={"tool": "analyze_template", "args": {}})
 
-        total_fill = analysis.get("total_cells_to_fill", 0)
-        if total_fill == 0:
-            yield ChatEvent(type="text_delta", data="채울 빈 셀이 없습니다.")
+        def _analyze():
+            filler = TemplateFiller(hwp)
+            return filler.analyze_template(), filler
+
+        structure, filler = await self._run_com(lambda: _analyze())
+        items = filler.get_fillable_summary(structure)
+
+        yield ChatEvent(type="tool_result", data={
+            "tool": "analyze_template",
+            "result": {
+                "info_fields": len([i for i in items if i["type"] == "info"]),
+                "narrative_sections": len([i for i in items if i["type"] == "narrative"]),
+                "total": len(items),
+            },
+        })
+
+        if not items:
+            self._filling_in_progress.discard(session_id)
+            yield ChatEvent(type="text_delta", data="채울 항목을 찾지 못했습니다.")
             return
 
-        yield ChatEvent(type="text_delta", data=f"표 {analysis.get('total_tables', 0)}개, 빈 셀 {total_fill}개 발견. 작성을 시작합니다...\n\n")
+        total = len(items)
+        yield ChatEvent(type="text_delta", data=f"기업정보 {len([i for i in items if i['type']=='info'])}개, 서술항목 {len([i for i in items if i['type']=='narrative'])}개 발견. 작성을 시작합니다...\n\n")
 
-        # 2단계: 빈 셀별로 LLM 생성 → COM 쓰기
-        schema = session.schema or {}
+        # 2단계: 항목별 LLM 생성 → 적절한 위치에 쓰기
         wrote = 0
+        for idx, item in enumerate(items):
+            yield ChatEvent(type="progress", data={
+                "current": idx + 1, "total": total,
+                "description": f"{item.get('label', '') or item.get('title', '')} 작성 중...",
+            })
 
-        for table in schema.get("tables", []):
-            for cell in table.get("cells", []):
-                if not cell.get("needs_fill"):
-                    continue
-
-                table_idx = table["table_idx"]
-                row, col = cell["row"], cell["col"]
-                context = cell.get("context", {})
-                label = context.get("row_label", "") or context.get("col_header", f"셀({row},{col})")
-
-                yield ChatEvent(type="progress", data={
-                    "current": wrote + 1, "total": total_fill,
-                    "description": f"{label} 작성 중...",
-                })
-
-                # LLM에 셀 내용 생성 요청 (도구 없이 순수 텍스트)
-                prompt = (
-                    f"정부사업 계획서 표의 다음 셀에 들어갈 내용을 작성하세요.\n"
-                    f"항목명: {label}\n"
-                )
-                if context.get("col_header"):
-                    prompt += f"열 헤더: {context['col_header']}\n"
-                prompt += f"\n사용자 요청: {user_message}\n"
-                prompt += "\n셀 내용만 작성하세요. 마크다운, 따옴표, 부연설명 금지."
-
-                try:
-                    gen_resp = await self.llm.chat(
-                        messages=[
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": prompt},
-                        ],
+            try:
+                if item["type"] == "info":
+                    # 기업정보: 짧은 값 생성
+                    prompt = (
+                        f"정부사업 신청서의 '{item['label']}' 항목에 들어갈 값을 작성하세요.\n"
+                        f"현재 예시값: {item['example']}\n"
+                        f"사용자 정보: {user_message}\n"
+                        f"\n값만 작성하세요. 따옴표, 설명 금지. 예시와 같은 형식으로."
+                    )
+                    resp = await self.llm.chat(
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
                         model_id=model_id,
                     )
-                    assert isinstance(gen_resp, LLMResponse)
-                    content = gen_resp.content.strip().strip('"').strip("'")
-
-                    if content and len(content) > 2:
-                        yield ChatEvent(type="tool_start", data={"tool": "write_cell", "args": {"row": row, "col": col}})
-                        result = await self._run_com(
-                            self._tool_write_cell_sync, ctrl,
-                            {"table_idx": table_idx, "row": row, "col": col, "text": content},
-                        )
-                        yield ChatEvent(type="tool_result", data={"tool": "write_cell", "result": result})
-                        yield ChatEvent(type="document_updated", data={"tool": "write_cell"})
+                    assert isinstance(resp, LLMResponse)
+                    value = resp.content.strip().strip('"').strip("'")
+                    if value and len(value) > 1:
+                        await self._run_com(lambda: filler.fill_info_field(item["table_idx"], item["index"], value))
                         wrote += 1
-                except Exception as e:
-                    logger.warning("셀 생성 실패", row=row, col=col, error=str(e))
+                        yield ChatEvent(type="tool_result", data={"tool": "fill_info", "result": {"label": item["label"], "value": value}})
+
+                elif item["type"] == "narrative":
+                    # 서술형: 제목 유지 + 내용 생성
+                    sub_labels = ", ".join(item.get("sub_items", []))
+                    prompt = (
+                        f"정부사업 계획서의 '{item['title']}' 섹션을 작성하세요.\n"
+                    )
+                    if sub_labels:
+                        prompt += f"하위 항목: {sub_labels}\n"
+                    if item.get("guide"):
+                        prompt += f"안내문: {item['guide']}\n"
+                    prompt += f"\n사용자 정보: {user_message}\n"
+                    prompt += (
+                        f"\n다음 형식으로 작성하세요:\n"
+                        f"{item['title']}\n"
+                        f"  1) [구체적인 내용 3~5줄]\n"
+                        f"  2) [구체적인 내용 3~5줄]\n"
+                        f"\n※ 안내문은 포함하지 마세요. 마크다운 금지."
+                    )
+                    resp = await self.llm.chat(
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                        model_id=model_id,
+                    )
+                    assert isinstance(resp, LLMResponse)
+                    content = resp.content.strip().strip('"')
+                    if content and len(content) > 10:
+                        await self._run_com(lambda c=content: filler.fill_narrative(item["table_idx"], c))
+                        wrote += 1
+                        yield ChatEvent(type="tool_result", data={"tool": "fill_narrative", "result": {"title": item["title"]}})
+                        yield ChatEvent(type="document_updated", data={"tool": "fill_narrative"})
+
+            except Exception as e:
+                logger.warning("항목 작성 실패", item=item.get("title", item.get("label", "")), error=str(e))
 
         # 3단계: 완료
         self._filling_in_progress.discard(session_id)
-        summary = f"\n\n{wrote}/{total_fill}개 셀 작성 완료. 한/글에서 결과를 확인하세요.\n수정이 필요하면 말씀해주세요."
+        summary = f"\n\n{wrote}/{total}개 항목 작성 완료. 한/글에서 결과를 확인하세요.\n수정이 필요하면 말씀해주세요."
         yield ChatEvent(type="text_delta", data=summary)
         self.get_history(session_id).append({"role": "assistant", "content": summary})
 
