@@ -53,9 +53,13 @@ class HwpController:
         if self._hwp is not None:
             return
 
+        self._via_pyhwpx = False
         try:
             from pyhwpx import Hwp
-            self._hwp = Hwp(visible=self._visible)
+            # pyhwpx Hwp()는 내부적으로 register_module()을 호출하므로
+            # 별도 보안 모듈 등록이 불필요하다.
+            self._hwp = Hwp(visible=self._visible, register_module=self._security_module)
+            self._via_pyhwpx = True
             logger.info("한/글 COM 연결 (pyhwpx)")
         except Exception:
             if win32 is None:
@@ -68,23 +72,35 @@ class HwpController:
                 self._hwp.XHwpWindows.Active = False
             logger.info("한/글 COM 연결 (win32com)")
 
-        # 보안 팝업 자동 승인 설정
-        self._suppress_security_popups()
+            # win32com 직접 연결 시에만 보안 설정 필요
+            self._suppress_security_popups()
+            if self._security_module:
+                self._register_security_module()
 
-        # 보안 모듈 등록
-        if self._security_module:
-            self._register_security_module()
+        # 모든 경로 공통: 찾기/바꾸기 등 일반 팝업 자동 처리
+        self._set_default_msgbox_mode()
 
-    def _suppress_security_popups(self) -> None:
-        """한/글의 보안/경고 팝업을 자동 승인으로 설정한다."""
+    def _set_default_msgbox_mode(self) -> None:
+        """모든 팝업을 자동 처리하도록 설정한다.
+
+        한/글 SetMessageBoxMode 플래그 (pyhwpx 문서 기준):
+          0x00001 — OK만 있는 팝업 → OK 자동
+          0x00010 — OK/Cancel 팝업 → OK 자동
+          0x01000 — Yes/No/Cancel 팝업 → Yes 자동
+          0x10000 — Yes/No 팝업 → Yes 자동
+
+        '문서 끝 도달' 찾기 팝업(Yes/No)은 Yes 선택 시 무한 루프 위험이
+        있으나, 우리 코드에서 FindReplace를 직접 호출하지 않으므로 안전.
+        pyhwpx의 find/replace 메서드는 내부에서 0x2FFF1로 전환 후 복원함.
+        """
         try:
-            # SetMessageBoxMode: 모든 메시지 박스에 자동으로 "예"를 선택
-            # 0x10000: MB_OK 자동 승인
-            # 0x20000: MB_YESNO에서 "예" 자동 선택
-            self._hwp.SetMessageBoxMode(0x10000 | 0x20000)
-            logger.debug("팝업 자동 승인 설정 완료")
+            self._hwp.SetMessageBoxMode(0x11011)
         except Exception:
             pass
+
+    def _suppress_security_popups(self) -> None:
+        """win32com 직접 연결 시 보안 관련 추가 설정을 적용한다."""
+        self._set_default_msgbox_mode()
 
         try:
             # 파일 접근 보안 경고 비활성화
@@ -95,10 +111,55 @@ class HwpController:
     def _register_security_module(self) -> None:
         """한/글 보안 모듈을 등록하여 자동화 접근을 허용한다."""
         try:
-            self._hwp.RegisterModule("FilePathCheckerModuleExample", "FilePathCheckerModule")
+            # 레지스트리에 DLL이 없으면 먼저 등록
+            self._ensure_security_dll_registered()
+            self._hwp.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")
             logger.debug("보안 모듈 등록 완료")
         except Exception:
-            logger.debug("보안 모듈 등록 스킵")
+            logger.warning("보안 모듈 등록 실패 — 파일 접근 팝업이 뜰 수 있습니다")
+
+    @staticmethod
+    def _ensure_security_dll_registered() -> None:
+        """FilePathCheckerModule.dll이 레지스트리에 없으면 자동 등록한다."""
+        import importlib.util
+
+        try:
+            from winreg import (
+                ConnectRegistry, HKEY_CURRENT_USER,
+                OpenKey, KEY_READ, QueryValueEx, CloseKey,
+            )
+        except ImportError:
+            return
+
+        reg = ConnectRegistry(None, HKEY_CURRENT_USER)
+        reg_path = r"Software\HNC\HwpAutomation\Modules"
+        try:
+            key = OpenKey(reg, reg_path, 0, KEY_READ)
+            val, _ = QueryValueEx(key, "FilePathCheckerModule")
+            CloseKey(key)
+            if val and os.path.exists(val):
+                return  # 이미 등록됨
+        except Exception:
+            pass
+
+        # pyhwpx 패키지에서 DLL 경로 찾기
+        spec = importlib.util.find_spec("pyhwpx")
+        if spec is None or spec.origin is None:
+            return
+        dll_path = os.path.join(os.path.dirname(spec.origin), "FilePathCheckerModule.dll")
+        if not os.path.exists(dll_path):
+            return
+
+        try:
+            from winreg import CreateKeyEx, KEY_WRITE, SetValueEx, REG_SZ
+            for rp in [r"Software\HNC\HwpAutomation\Modules",
+                       r"Software\Hnc\HwpUserAction\Modules"]:
+                key = CreateKeyEx(reg, rp, 0, KEY_WRITE)
+                SetValueEx(key, "FilePathCheckerModule", 0, REG_SZ, dll_path)
+                CloseKey(key)
+            logger.info("보안 모듈 DLL 레지스트리 등록 완료", path=dll_path)
+        except Exception:
+            pass
 
     @property
     def hwp(self) -> Any:
@@ -122,8 +183,9 @@ class HwpController:
         if not Path(abs_path).exists():
             raise FileNotFoundError(f"파일을 찾을 수 없습니다: {abs_path}")
 
-        # 파일 열기 전 팝업 자동 승인 재설정
-        self._suppress_security_popups()
+        # win32com 직접 연결 시에만 팝업 재설정 (pyhwpx는 자체 처리)
+        if not self._via_pyhwpx:
+            self._suppress_security_popups()
         self.hwp.Open(abs_path, "HWP", "forceopen:true")
         self._file_path = abs_path
         logger.info("문서 열기 완료", path=abs_path)

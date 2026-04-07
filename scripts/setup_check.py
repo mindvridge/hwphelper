@@ -75,7 +75,7 @@ def main() -> None:
     if hwp_ok:
         try:
             hwp2 = win32.Dispatch("HWPFrame.HwpObject")  # type: ignore[possibly-undefined]
-            hwp2.RegisterModule("FilePathCheckerModuleExample", "FilePathCheckerModule")
+            hwp2.RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")
             sec_ok = True
             sec_msg = "등록 성공"
             try:
