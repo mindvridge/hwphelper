@@ -235,37 +235,54 @@ class ChatAgent:
             yield ChatEvent(type="text_delta", data="HWP 파일을 먼저 업로드해주세요.")
             return
 
-        hwp = session.hwp_ctrl.hwp
+        working_path = session.working_path
 
         # 1단계: 양식 구조 분석 (COM + 비전)
         yield ChatEvent(type="tool_start", data={"tool": "analyze_template", "args": {}})
 
         def _analyze():
-            filler = TemplateFiller(hwp)
+            # COM 스레드에서 새로 문서를 열어서 분석 (스레드 마샬링 문제 방지)
+            from src.hwp_engine.com_controller import HwpController
+            ctrl = HwpController(visible=True)
+            ctrl.connect()
+            ctrl.open(working_path)
+            hwp_local = ctrl.hwp
+
+            filler = TemplateFiller(hwp_local)
             structure = filler.analyze_template()
+
             # 페이지 이미지 렌더링 (비전용)
             try:
-                renderer = PageRenderer(session.hwp_ctrl)
+                renderer = PageRenderer(ctrl)
                 page_images = renderer.render_all_pages()
             except Exception:
                 page_images = []
-            return structure, filler, page_images
 
-        structure, filler, page_images = await self._run_com(lambda: _analyze())
+            return structure, filler, page_images, ctrl, hwp_local
 
-        # 비전 보강: 페이지 이미지가 있으면 LLM 비전으로 문서 구조 추가 분석
+        structure, filler, page_images, com_ctrl, hwp = await self._run_com(lambda: _analyze())
+
+        # 비전 보강: 별도 스레드에서 동기 실행 (async generator 내 await 교착 방지)
         vision_context = ""
         if page_images:
+            yield ChatEvent(type="text_delta", data="📷 문서 이미지 분석 중...\n")
             try:
+                import time as _time
                 vision_reader = VisionReader(self.llm)
-                # 첫 2페이지만 분석 (비용 절약)
-                vision_pages = await vision_reader.read_all_pages(page_images[:2])
-                table_count = sum(len(vp.tables) for vp in vision_pages)
+                logger.info("비전 분석 시작", model=vision_reader._model_id)
+                t_start = _time.time()
+                # 동기 호출을 스레드에서 실행 (async generator 교착 방지)
+                vision_result = await self._run_com(
+                    lambda: vision_reader._sync_read_page(page_images[0])
+                )
+                elapsed = _time.time() - t_start
+                table_count = len(vision_result.tables)
+                logger.info("비전 분석 완료", tables=table_count, elapsed=f"{elapsed:.1f}s")
                 if table_count > 0:
-                    vision_context = f" (비전 인식: {table_count}개 표 확인)"
+                    vision_context = f" (비전 인식: {table_count}개 표, {elapsed:.1f}초)"
                     yield ChatEvent(type="text_delta", data=f"📷 문서 이미지 분석 완료{vision_context}\n")
             except Exception as exc:
-                logger.debug("비전 분석 스킵", error=str(exc))
+                logger.warning("비전 분석 실패", error=str(exc), type=type(exc).__name__)
 
         items = filler.get_fillable_summary(structure)
 
@@ -287,6 +304,7 @@ class ChatAgent:
 
         if not items:
             self._filling_in_progress.discard(session_id)
+            await self._run_com(lambda: com_ctrl.quit())
             yield ChatEvent(type="text_delta", data="채울 항목을 찾지 못했습니다.")
             return
 
@@ -530,7 +548,15 @@ class ChatAgent:
             except Exception as e:
                 logger.warning("항목 작성 실패", item=item.get("title", item.get("label", "")), error=str(e))
 
-        # 3단계: 완료
+        # 3단계: 완료 — COM 저장 및 정리
+        try:
+            await self._run_com(lambda: (com_ctrl.save(), com_ctrl.quit()))
+        except Exception:
+            try:
+                await self._run_com(lambda: com_ctrl.quit())
+            except Exception:
+                pass
+
         self._filling_in_progress.discard(session_id)
         summary = f"\n\n{wrote}/{total}개 항목 작성 완료. 한/글에서 결과를 확인하세요.\n수정이 필요하면 말씀해주세요."
         yield ChatEvent(type="text_delta", data=summary)
@@ -578,8 +604,17 @@ class ChatAgent:
         """COM 작업을 전용 스레드에서 실행한다."""
         import asyncio
         loop = asyncio.get_running_loop()
+
+        def _wrapped():
+            import pythoncom
+            pythoncom.CoInitialize()
+            try:
+                return func(*args)
+            finally:
+                pass  # CoUninitialize는 스레드 종료 시 자동
+
         if self.com_executor:
-            return await loop.run_in_executor(self.com_executor, func, *args)
+            return await loop.run_in_executor(self.com_executor, _wrapped)
         return func(*args)
 
     async def execute_tool(self, session_id: str, tool_call: ToolCall) -> dict[str, Any]:

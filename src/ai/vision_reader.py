@@ -150,31 +150,75 @@ class VisionReader:
     async def read_page_tables(self, page: PageImage) -> VisionPageResult:
         """페이지 이미지에서 모든 표를 인식한다."""
         messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": [
-                {"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": page.mime_type,
-                    "data": page.base64_data,
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{page.mime_type};base64,{page.base64_data}",
                 }},
-                {"type": "text", "text": "이 페이지의 모든 표를 분석하여 JSON으로 출력하세요."},
+                {"type": "text", "text": _SYSTEM_PROMPT + "\n\n이 페이지의 모든 표를 분석하여 JSON으로 출력하세요."},
             ]},
         ]
 
         try:
-            from .llm_router import LLMResponse
-            response = await self._router.chat(
-                messages=messages,
-                model_id=self._model_id,
-                max_tokens=8192,
-            )
-            if not isinstance(response, LLMResponse):
-                return VisionPageResult(page_num=page.page_num)
-
-            return self._parse_page_result(page.page_num, response.content)
+            # 독립 httpx 클라이언트로 직접 호출 (공유 클라이언트 데드락 방지)
+            response_text = await self._direct_call(messages)
+            return self._parse_page_result(page.page_num, response_text)
         except Exception as exc:
             logger.warning("비전 페이지 분석 실패", page=page.page_num, error=str(exc))
             return VisionPageResult(page_num=page.page_num)
+
+    async def _direct_call(self, messages: list[dict]) -> str:
+        """동기 httpx를 별도 스레드에서 실행하여 이벤트 루프 블로킹을 방지한다."""
+        import asyncio
+        import concurrent.futures
+
+        loop = asyncio.get_running_loop()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return await loop.run_in_executor(pool, self._sync_call, messages)
+
+    def _sync_call(self, messages: list[dict]) -> str:
+        """동기 httpx로 LLM API를 호출한다."""
+        import httpx
+        import os
+
+        cfg = self._router._models.get(self._model_id, {})
+        provider = cfg.get("provider", "")
+        model_name = cfg.get("model", "")
+        api_key = os.environ.get(cfg.get("api_key_env", ""), "") or cfg.get("default_api_key", "")
+        base_url = os.environ.get(cfg.get("base_url_env", ""), "") or cfg.get("default_base_url", "")
+
+        if provider == "anthropic":
+            converted_msgs = self._router._convert_content_for_anthropic(messages[0]["content"])
+            body = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": converted_msgs}],
+                "max_tokens": 4096,
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            }
+            url = "https://api.anthropic.com/v1/messages"
+        else:
+            body = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": 4096,
+            }
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            url = f"{base_url.rstrip('/')}/chat/completions"
+
+        with httpx.Client(timeout=120) as client:
+            resp = client.post(url, json=body, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if provider == "anthropic":
+            return data.get("content", [{}])[0].get("text", "")
+        else:
+            return data["choices"][0]["message"]["content"]
 
     async def verify_writes(
         self,
@@ -214,6 +258,32 @@ class VisionReader:
         except Exception as exc:
             logger.warning("비전 검증 실패", error=str(exc))
             return []
+
+    def _sync_read_page(self, page: PageImage) -> VisionPageResult:
+        """동기 방식으로 페이지를 분석한다 (스레드에서 호출용)."""
+        # 간소화된 프롬프트로 응답 시간 단축
+        compact_prompt = (
+            "이 한국어 문서 페이지의 표를 분석하세요. JSON으로 출력:\n"
+            '{"tables":[{"table_idx":0,"rows":행수,"cols":열수,"description":"표설명",'
+            '"cells":[{"row":0,"col":0,"text":"셀텍스트","is_label":true,"is_empty":false,'
+            '"is_guide":false,"color":"black"}]}]}\n'
+            "규칙: is_label=항목명, is_guide=※안내문, color=텍스트색상(black/blue). "
+            "셀 텍스트는 처음 30자만."
+        )
+        messages = [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{page.mime_type};base64,{page.base64_data}",
+                }},
+                {"type": "text", "text": compact_prompt},
+            ]},
+        ]
+        try:
+            response_text = self._sync_call(messages)
+            return self._parse_page_result(page.page_num, response_text)
+        except Exception as exc:
+            logger.warning("비전 동기 분석 실패", error=str(exc))
+            return VisionPageResult(page_num=page.page_num)
 
     async def read_all_pages(self, pages: list[PageImage]) -> list[VisionPageResult]:
         """모든 페이지를 순차적으로 분석한다."""
