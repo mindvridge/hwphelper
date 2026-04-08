@@ -346,6 +346,12 @@ class LLMRouter:
         # system 메시지 분리
         system_msg, chat_msgs = self._split_system_message(messages)
 
+        # 멀티모달 콘텐츠 변환 (image_url → image 블록)
+        chat_msgs = [
+            {**m, "content": self._convert_content_for_anthropic(m["content"])}
+            for m in chat_msgs
+        ]
+
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": chat_msgs,
@@ -417,6 +423,11 @@ class LLMRouter:
         temperature: float, max_tokens: int,
     ) -> LLMResponse:
         """OpenAI Chat Completions API 호출."""
+        # 멀티모달 콘텐츠 변환 (image → image_url 블록)
+        messages = [
+            {**m, "content": self._convert_content_for_openai(m["content"])}
+            for m in messages
+        ]
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -497,6 +508,11 @@ class LLMRouter:
         base_url: str = client_info["_base_url"]
         api_key: str = client_info["_api_key"]
 
+        # 멀티모달 콘텐츠 변환 (image → image_url 블록)
+        messages = [
+            {**m, "content": self._convert_content_for_openai(m["content"])}
+            for m in messages
+        ]
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -582,10 +598,112 @@ class LLMRouter:
         chat_msgs: list[dict] = []
         for msg in messages:
             if msg.get("role") == "system":
-                system_parts.append(msg["content"])
+                content = msg["content"]
+                if isinstance(content, str):
+                    system_parts.append(content)
+                # 멀티모달 system은 무시 (텍스트만 추출)
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            system_parts.append(block["text"])
             else:
                 chat_msgs.append(msg)
         return "\n\n".join(system_parts), chat_msgs
+
+    @staticmethod
+    def _convert_content_for_anthropic(content: Any) -> Any:
+        """멀티모달 콘텐츠를 Anthropic 형식으로 변환한다.
+
+        OpenAI 형식 image_url → Anthropic 형식 image 블록 변환.
+        """
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return content
+
+        converted: list[dict] = []
+        for block in content:
+            if not isinstance(block, dict):
+                converted.append(block)
+                continue
+
+            block_type = block.get("type", "")
+
+            if block_type == "text":
+                converted.append({"type": "text", "text": block["text"]})
+
+            elif block_type == "image":
+                # 이미 Anthropic 형식
+                converted.append(block)
+
+            elif block_type == "image_url":
+                # OpenAI 형식 → Anthropic 형식
+                url = block.get("image_url", {}).get("url", "")
+                if url.startswith("data:"):
+                    # data:image/png;base64,... 파싱
+                    header, b64_data = url.split(",", 1)
+                    media_type = header.split(":")[1].split(";")[0]
+                    converted.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64_data,
+                        },
+                    })
+                else:
+                    converted.append({
+                        "type": "image",
+                        "source": {"type": "url", "url": url},
+                    })
+            else:
+                converted.append(block)
+
+        return converted
+
+    @staticmethod
+    def _convert_content_for_openai(content: Any) -> Any:
+        """멀티모달 콘텐츠를 OpenAI 형식으로 변환한다.
+
+        Anthropic 형식 image 블록 → OpenAI 형식 image_url 변환.
+        """
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return content
+
+        converted: list[dict] = []
+        for block in content:
+            if not isinstance(block, dict):
+                converted.append(block)
+                continue
+
+            block_type = block.get("type", "")
+
+            if block_type == "text":
+                converted.append({"type": "text", "text": block["text"]})
+
+            elif block_type == "image_url":
+                converted.append(block)
+
+            elif block_type == "image":
+                source = block.get("source", {})
+                if source.get("type") == "base64":
+                    media_type = source.get("media_type", "image/png")
+                    data = source.get("data", "")
+                    converted.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{data}"},
+                    })
+                elif source.get("type") == "url":
+                    converted.append({
+                        "type": "image_url",
+                        "image_url": {"url": source["url"]},
+                    })
+            else:
+                converted.append(block)
+
+        return converted
 
     @staticmethod
     def _convert_tools_to_anthropic(tools: list[dict]) -> list[dict]:

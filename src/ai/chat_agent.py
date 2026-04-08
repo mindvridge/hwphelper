@@ -18,12 +18,15 @@ from src.hwp_engine.cell_classifier import CellClassifier
 from src.hwp_engine.cell_writer import CellFill, CellWriter
 from src.hwp_engine.document_manager import DocumentManager
 from src.hwp_engine.field_manager import FieldManager
+from src.hwp_engine.page_renderer import PageRenderer
 from src.hwp_engine.schema_generator import SchemaGenerator
 from src.hwp_engine.table_reader import TableReader
 from src.hwp_engine.template_filler import TemplateFiller
 
 from .llm_router import LLMResponse, LLMRouter, ToolCall
 from .tool_definitions import DOCUMENT_MODIFYING_TOOLS, HWP_TOOLS
+from .vision_reader import VisionReader
+from .vision_reconciler import VisionReconciler
 
 logger = structlog.get_logger()
 
@@ -234,14 +237,36 @@ class ChatAgent:
 
         hwp = session.hwp_ctrl.hwp
 
-        # 1단계: 양식 구조 분석
+        # 1단계: 양식 구조 분석 (COM + 비전)
         yield ChatEvent(type="tool_start", data={"tool": "analyze_template", "args": {}})
 
         def _analyze():
             filler = TemplateFiller(hwp)
-            return filler.analyze_template(), filler
+            structure = filler.analyze_template()
+            # 페이지 이미지 렌더링 (비전용)
+            try:
+                renderer = PageRenderer(session.hwp_ctrl)
+                page_images = renderer.render_all_pages()
+            except Exception:
+                page_images = []
+            return structure, filler, page_images
 
-        structure, filler = await self._run_com(lambda: _analyze())
+        structure, filler, page_images = await self._run_com(lambda: _analyze())
+
+        # 비전 보강: 페이지 이미지가 있으면 LLM 비전으로 문서 구조 추가 분석
+        vision_context = ""
+        if page_images:
+            try:
+                vision_reader = VisionReader(self.llm)
+                # 첫 2페이지만 분석 (비용 절약)
+                vision_pages = await vision_reader.read_all_pages(page_images[:2])
+                table_count = sum(len(vp.tables) for vp in vision_pages)
+                if table_count > 0:
+                    vision_context = f" (비전 인식: {table_count}개 표 확인)"
+                    yield ChatEvent(type="text_delta", data=f"📷 문서 이미지 분석 완료{vision_context}\n")
+            except Exception as exc:
+                logger.debug("비전 분석 스킵", error=str(exc))
+
         items = filler.get_fillable_summary(structure)
 
         info_count = len([i for i in items if i["type"] == "info"])
@@ -308,6 +333,8 @@ class ChatAgent:
 
                 elif item["type"] == "body_section":
                     # 본문 섹션: ◦/- 마커 유무에 따라 다른 전략
+                    # 비전 모델이면 페이지 이미지 첨부하여 정확도 향상
+                    use_vision = bool(page_images) and self._model_supports_vision(model_id)
                     markers = item.get("markers", [])
                     marker_count = len(markers)
 
@@ -342,8 +369,13 @@ class ChatAgent:
                             f"◦, - 기호는 포함하지 마세요. 내용만 작성하세요.\n"
                             f"※ 안내문, 마크다운, 따옴표 금지."
                         )
+                        # 비전 모델이면 페이지 이미지 첨부
+                        if use_vision:
+                            user_content = self._build_vision_prompt(prompt, page_images, max_pages=1)
+                        else:
+                            user_content = prompt
                         resp = await self.llm.chat(
-                            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_content}],
                             model_id=model_id,
                         )
                         if not isinstance(resp, LLMResponse):
@@ -382,8 +414,12 @@ class ChatAgent:
                             f"\n3~5개의 소제목(◦)과 각각의 세부 설명(-)을 작성하세요.\n"
                             f"※ 안내문은 포함하지 마세요. 마크다운 금지."
                         )
+                        if use_vision:
+                            user_content = self._build_vision_prompt(prompt, page_images, max_pages=1)
+                        else:
+                            user_content = prompt
                         resp = await self.llm.chat(
-                            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_content}],
                             model_id=model_id,
                         )
                         if not isinstance(resp, LLMResponse):
@@ -418,8 +454,13 @@ class ChatAgent:
                         f"  2) [구체적인 내용 3~5줄]\n"
                         f"\n※ 안내문은 포함하지 마세요. 마크다운 금지."
                     )
+                    use_vision_n = bool(page_images) and self._model_supports_vision(model_id)
+                    if use_vision_n:
+                        user_content_n = self._build_vision_prompt(prompt, page_images, max_pages=1)
+                    else:
+                        user_content_n = prompt
                     resp = await self.llm.chat(
-                        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_content_n}],
                         model_id=model_id,
                     )
                     if not isinstance(resp, LLMResponse):
@@ -498,6 +539,40 @@ class ChatAgent:
     # ------------------------------------------------------------------
     # 도구 실행
     # ------------------------------------------------------------------
+
+    def _model_supports_vision(self, model_id: str | None = None) -> bool:
+        """모델이 비전(이미지 인식)을 지원하는지 확인한다."""
+        mid = model_id or self.llm._default_model
+        cfg = self.llm._models.get(mid, {})
+        return bool(cfg.get("supports_vision", False))
+
+    def _build_vision_prompt(
+        self,
+        text_prompt: str,
+        page_images: list[Any],
+        max_pages: int = 1,
+    ) -> list[dict[str, Any]]:
+        """텍스트 프롬프트에 페이지 이미지를 결합한 멀티모달 메시지를 만든다.
+
+        비전 모델이 문서 이미지를 보면서 더 정확한 콘텐츠를 생성할 수 있다.
+        """
+        content: list[dict[str, Any]] = []
+
+        # 페이지 이미지 추가 (최대 max_pages장)
+        for page in page_images[:max_pages]:
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": page.mime_type,
+                    "data": page.base64_data,
+                },
+            })
+
+        # 텍스트 프롬프트
+        content.append({"type": "text", "text": text_prompt})
+
+        return content
 
     async def _run_com(self, func: Any, *args: Any) -> Any:
         """COM 작업을 전용 스레드에서 실행한다."""
@@ -579,12 +654,23 @@ class ChatAgent:
         for t in tables:
             classifier.classify_table(t)
 
+        # 비전 페이지 이미지 캐시 (비동기 파이프라인에서 사용)
+        try:
+            renderer = PageRenderer(ctrl)
+            pages = renderer.render_all_pages()
+            session.page_images = pages
+            logger.info("페이지 이미지 렌더링 완료", pages=len(pages))
+        except Exception as exc:
+            session.page_images = []
+            logger.debug("페이지 렌더링 스킵", error=str(exc))
+
         schema = generator.generate(tables, ctrl.file_path or "")
         session.schema = schema
 
         return {
             "total_tables": schema["total_tables"],
             "total_cells_to_fill": schema["total_cells_to_fill"],
+            "page_images": len(getattr(session, "page_images", [])),
             "tables_summary": [
                 {
                     "table_idx": t["table_idx"],

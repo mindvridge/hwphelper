@@ -16,28 +16,32 @@ models:
     model: claude-sonnet-4-20250514
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 4096
-    description: "Claude Sonnet 4 — 한국��� 품질 우수, 구조화 출력 강점"
+    supports_vision: true
+    description: "Claude Sonnet 4 — 한국어 품질 우수, 구조화 출력 강점, 비전 지원"
 
   claude-opus:
     provider: anthropic
     model: claude-opus-4-20250514
     api_key_env: ANTHROPIC_API_KEY
     max_tokens: 4096
-    description: "Claude Opus 4 — 최고 ���질, 복잡한 계획서에 적합"
+    supports_vision: true
+    description: "Claude Opus 4 — 최고 품질, 복잡한 계획서에 적합, 비전 지원"
 
   gpt-4o:
     provider: openai
     model: gpt-4o
     api_key_env: OPENAI_API_KEY
     max_tokens: 4096
-    description: "GPT-4o — 범용 고성능"
+    supports_vision: true
+    description: "GPT-4o — 범용 고성능, 비전 지원"
 
   gpt-4o-mini:
     provider: openai
     model: gpt-4o-mini
     api_key_env: OPENAI_API_KEY
     max_tokens: 4096
-    description: "GPT-4o Mini — 빠르고 저렴"
+    supports_vision: true
+    description: "GPT-4o Mini — 빠르고 저렴, 비전 지원"
 
   deepseek-v3:
     provider: openai_compatible
@@ -60,3 +64,12 @@ models:
 
 default_model: qwen3.5-27b
 embedding_model: text-embedding-3-small
+
+# 비전 파이프라인 설정
+vision:
+  enabled: true
+  verification_enabled: true
+  render_dpi: 150
+  verify_dpi: 200
+  max_retries: 2
+  vision_model: null  # null이면 supports_vision: true인 모델 자동 탐색
