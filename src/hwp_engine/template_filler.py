@@ -286,8 +286,8 @@ class TemplateFiller:
         for _ in range(moves):
             hwp.TableRightCell()
 
-        hwp.HAction.Run("MoveColBegin")
-        hwp.HAction.Run("MoveSelColEnd")
+        hwp.HAction.Run("SelectAll")
+        hwp.HAction.Run("Delete")
         hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
         hwp.HParameterSet.HInsertText.Text = text
         hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
@@ -295,21 +295,33 @@ class TemplateFiller:
     def fill_body_section(self, table_idx: int, section: BodySection, contents: list[str]) -> None:
         """본문 B1 셀의 특정 섹션에 내용을 채운다.
 
-        전략: ◦/- 기호가 있는 단락으로 이동하여 기호 뒤에 텍스트를 추가한다.
-        ※ 안내문 단락은 삭제한다.
+        전략: 셀 전체를 SelectAll → Delete 후 제목 + 내용을 삽입한다.
+        MoveColBegin/MoveSelColEnd는 표 셀에서 작동하지 않으므로 사용 금지.
         """
         hwp = self._hwp
         hwp.get_into_nth_table(table_idx)
         hwp.TableRightCell()  # B1
 
-        # 1단계: ※ 안내문 삭제
-        self._delete_guide_paragraphs(section)
+        # 셀 전체 선택 → 삭제
+        hwp.HAction.Run("SelectAll")
+        hwp.HAction.Run("Delete")
 
-        # 2단계: ◦/- 마커에 내용 추가
-        # 다시 B1 진입 (안내문 삭제 후 위치가 변경되었을 수 있음)
-        hwp.get_into_nth_table(table_idx)
-        hwp.TableRightCell()
-        self._fill_markers(section, contents)
+        # 제목 + 내용 삽입
+        full_text = f"{section.title}\n" + "\n".join(contents)
+        lines = full_text.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip():
+                hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+                hwp.HParameterSet.HInsertText.Text = line
+                hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+            if i < len(lines) - 1:
+                hwp.HAction.Run("BreakPara")
+
+        logger.info("섹션 채우기 완료",
+                     section=section.section_num,
+                     title=section.title[:30],
+                     filled=len(contents),
+                     total_markers=len(section.markers))
 
     def _delete_guide_paragraphs(self, section: BodySection) -> None:
         """현재 B1 셀에서 해당 섹션의 ※ 안내문 단락을 찾아 삭제한다."""
@@ -499,22 +511,16 @@ class TemplateFiller:
     def fill_body_narrative(self, table_idx: int, section: BodySection, content: str) -> None:
         """마커 없는 본문 섹션의 B1 셀에 내용을 작성한다.
 
-        ※ 안내문을 삭제한 후, 셀의 기존 서식을 유지하면서 내용을 삽입한다.
+        셀 전체를 SelectAll → Delete 후 제목 + 내용을 삽입한다.
         """
         hwp = self._hwp
 
-        # 1단계: ※ 안내문 삭제
-        hwp.get_into_nth_table(table_idx)
-        hwp.TableRightCell()  # B1
-        self._delete_guide_paragraphs(section)
-
-        # 2단계: B1 셀 전체 선택 → 밑줄 제거 → 내용 교체
+        # B1 셀 전체 선택 → 삭제 → 내용 교체
         hwp.get_into_nth_table(table_idx)
         hwp.TableRightCell()  # B1
 
-        hwp.HAction.Run("MoveColBegin")
-        hwp.HAction.Run("MoveSelColEnd")
-        self._clear_formatting(hwp)
+        hwp.HAction.Run("SelectAll")
+        hwp.HAction.Run("Delete")
 
         # 줄 단위로 삽입 (서식 보존)
         lines = content.split("\n")
@@ -536,9 +542,8 @@ class TemplateFiller:
         hwp = self._hwp
         hwp.get_into_nth_table(table_idx)
 
-        hwp.HAction.Run("MoveColBegin")
-        hwp.HAction.Run("MoveSelColEnd")
-        self._clear_formatting(hwp)
+        hwp.HAction.Run("SelectAll")
+        hwp.HAction.Run("Delete")
         hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
         hwp.HParameterSet.HInsertText.Text = content
         hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
@@ -683,8 +688,8 @@ class TemplateFiller:
         for _ in range(total_moves):
             hwp.TableRightCell()
 
-        hwp.HAction.Run("MoveColBegin")
-        hwp.HAction.Run("MoveSelColEnd")
+        hwp.HAction.Run("SelectAll")
+        hwp.HAction.Run("Delete")
 
         # 텍스트 색상을 검정(0x00000000)으로 설정
         try:

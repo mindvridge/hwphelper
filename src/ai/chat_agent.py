@@ -237,11 +237,18 @@ class ChatAgent:
 
         working_path = session.working_path
 
+        # 업로드 시 생성된 COM 세션을 완전히 닫아야 새 COM에서 파일을 열 수 있음
+        try:
+            await self._run_com(lambda: session.hwp_ctrl.quit())
+            logger.info("업로드 COM 세션 종료", session_id=session_id)
+        except Exception:
+            pass
+
         # 1단계: 양식 구조 분석 (COM + 비전)
         yield ChatEvent(type="tool_start", data={"tool": "analyze_template", "args": {}})
 
         def _analyze():
-            # COM 스레드에서 새로 문서를 열어서 분석 (스레드 마샬링 문제 방지)
+            # COM 스레드에서 새로 문서를 열어서 분석+쓰기
             from src.hwp_engine.com_controller import HwpController
             ctrl = HwpController(visible=True)
             ctrl.connect()
@@ -548,14 +555,29 @@ class ChatAgent:
             except Exception as e:
                 logger.warning("항목 작성 실패", item=item.get("title", item.get("label", "")), error=str(e))
 
-        # 3단계: 완료 — COM 저장 및 정리
+        # 3단계: 완료 — COM 저장 및 정리, 세션 COM 재연결
         try:
-            await self._run_com(lambda: (com_ctrl.save(), com_ctrl.quit()))
+            await self._run_com(lambda: com_ctrl.save())
+            logger.info("자동채우기 결과 저장 완료")
+        except Exception as exc:
+            logger.warning("저장 실패", error=str(exc))
+        try:
+            await self._run_com(lambda: com_ctrl.quit())
         except Exception:
-            try:
-                await self._run_com(lambda: com_ctrl.quit())
-            except Exception:
-                pass
+            pass
+
+        # 세션 COM을 다시 열어서 이후 작업(다운로드 등) 가능하게
+        try:
+            def _reopen():
+                from src.hwp_engine.com_controller import HwpController
+                new_ctrl = HwpController(visible=True)
+                new_ctrl.connect()
+                new_ctrl.open(working_path)
+                session.hwp_ctrl = new_ctrl
+            await self._run_com(_reopen)
+            logger.info("세션 COM 재연결 완료")
+        except Exception as exc:
+            logger.warning("세션 COM 재연결 실패", error=str(exc))
 
         self._filling_in_progress.discard(session_id)
         summary = f"\n\n{wrote}/{total}개 항목 작성 완료. 한/글에서 결과를 확인하세요.\n수정이 필요하면 말씀해주세요."
@@ -600,8 +622,20 @@ class ChatAgent:
 
         return content
 
+    # 전용 COM 스레드 — 항상 같은 스레드에서 실행되어야 COM 객체 접근 가능
+    _com_thread_executor: Any = None
+
+    def _get_com_executor(self) -> Any:
+        """파이프라인 전용 COM 스레드풀을 반환한다 (항상 같은 스레드 보장)."""
+        import concurrent.futures
+        if self._com_thread_executor is None:
+            self._com_thread_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="com-pipeline"
+            )
+        return self._com_thread_executor
+
     async def _run_com(self, func: Any, *args: Any) -> Any:
-        """COM 작업을 전용 스레드에서 실행한다."""
+        """COM 작업을 전용 단일 스레드에서 실행한다."""
         import asyncio
         loop = asyncio.get_running_loop()
 
@@ -611,11 +645,10 @@ class ChatAgent:
             try:
                 return func(*args)
             finally:
-                pass  # CoUninitialize는 스레드 종료 시 자동
+                pass
 
-        if self.com_executor:
-            return await loop.run_in_executor(self.com_executor, _wrapped)
-        return func(*args)
+        executor = self._get_com_executor()
+        return await loop.run_in_executor(executor, _wrapped)
 
     async def execute_tool(self, session_id: str, tool_call: ToolCall) -> dict[str, Any]:
         """도구를 실행한다."""
