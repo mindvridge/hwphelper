@@ -215,7 +215,7 @@ class VisionReader:
             with httpx.Client(timeout=120) as client:
                 resp = client.post(url, json=body, headers=headers)
                 if resp.status_code == 429 and attempt < 3:
-                    wait = 2 ** attempt
+                    wait = 5 * (attempt + 1)  # 5, 10, 15초
                     logger.warning("비전 API rate limit, 재시도", attempt=attempt + 1, wait=wait)
                     time.sleep(wait)
                     continue

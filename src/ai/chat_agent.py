@@ -580,9 +580,9 @@ class ChatAgent:
             except Exception as e:
                 logger.warning("항목 작성 실패", item=item.get("title", item.get("label", "")), error=str(e))
 
-            # API rate limit 방지: 항목 간 2초 딜레이
+            # API rate limit 방지: 항목 간 3초 딜레이
             import asyncio as _aio_delay
-            await _aio_delay.sleep(2.0)
+            await _aio_delay.sleep(3.0)
 
         # 3단계: 완료 — COM 저장 및 정리, 세션 COM 재연결
         try:

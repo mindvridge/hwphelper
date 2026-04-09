@@ -269,7 +269,7 @@ class LLMRouter:
                 if hasattr(exc, "response"):
                     status = getattr(exc.response, "status_code", status)
                 if status == 429 and attempt < max_retries:
-                    wait = 3 * (attempt + 1)  # 3, 6, 9초
+                    wait = 5 * (attempt + 1)  # 5, 10, 15초
                     logger.warning("Rate limit (429), 재시도", attempt=attempt + 1, wait=wait)
                     await _aio.sleep(wait)
                     continue
@@ -547,7 +547,7 @@ class LLMRouter:
         for _attempt in range(4):
             resp = await http.post(f"{base_url}/chat/completions", json=body, headers=headers)
             if resp.status_code == 429 and _attempt < 3:
-                wait = 3 * (_attempt + 1)  # 3, 6, 9초
+                wait = 5 * (_attempt + 1)  # 5, 10, 15초
                 logger.warning("httpx 429 rate limit, 재시도", attempt=_attempt + 1, wait=wait)
                 await _aio_retry.sleep(wait)
                 continue
