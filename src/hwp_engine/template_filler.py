@@ -279,10 +279,23 @@ class TemplateFiller:
     # 채우기
     # ------------------------------------------------------------------
 
+    def _enter_table(self, table_idx: int) -> bool:
+        """표에 진입한다. 실패하면 False를 반환한다.
+
+        SelectAll 전에 반드시 호출하여, 표 밖에서 SelectAll이
+        실행되어 문서 전체가 삭제되는 사고를 방지한다.
+        """
+        result = self._hwp.get_into_nth_table(table_idx)
+        if result is False:
+            logger.warning("표 진입 실패, 쓰기 건너뜀", table_idx=table_idx)
+            return False
+        return True
+
     def fill_info_field(self, table_idx: int, moves: int, text: str) -> None:
         """기업정보 표의 특정 셀에 값을 채운다."""
         hwp = self._hwp
-        hwp.get_into_nth_table(table_idx)
+        if not self._enter_table(table_idx):
+            return
         for _ in range(moves):
             hwp.TableRightCell()
 
@@ -299,7 +312,8 @@ class TemplateFiller:
         MoveColBegin/MoveSelColEnd는 표 셀에서 작동하지 않으므로 사용 금지.
         """
         hwp = self._hwp
-        hwp.get_into_nth_table(table_idx)
+        if not self._enter_table(table_idx):
+            return
         hwp.TableRightCell()  # B1
 
         # 셀 전체 선택 → 삭제
@@ -516,7 +530,8 @@ class TemplateFiller:
         hwp = self._hwp
 
         # B1 셀 전체 선택 → 삭제 → 내용 교체
-        hwp.get_into_nth_table(table_idx)
+        if not self._enter_table(table_idx):
+            return
         hwp.TableRightCell()  # B1
 
         hwp.HAction.Run("SelectAll")
@@ -540,7 +555,8 @@ class TemplateFiller:
         하위 호환: body_section 방식이 아닌 단순 표에 사용.
         """
         hwp = self._hwp
-        hwp.get_into_nth_table(table_idx)
+        if not self._enter_table(table_idx):
+            return
 
         hwp.HAction.Run("SelectAll")
         hwp.HAction.Run("Delete")
@@ -593,8 +609,16 @@ class TemplateFiller:
         if not full or len(full) < 5:
             return None
 
+        # ※ 안내문 전용 표는 채우기 대상이 아님 (삭제 대상)
+        if full.startswith("※"):
+            return None
+
         lines = full.split("\n")
         title = lines[0].strip() if lines else ""
+
+        # 제목만 있고 내용이 없는 표 (섹션 헤더 등)도 제외
+        if len(lines) <= 1 and len(title) < 10:
+            return None
 
         sub_items = []
         for line in lines:
@@ -682,7 +706,8 @@ class TemplateFiller:
         row는 DataFrame 기준 (헤더 제외) 1-based, col은 0-based.
         """
         hwp = self._hwp
-        hwp.get_into_nth_table(table_idx)
+        if not self._enter_table(table_idx):
+            return
 
         total_moves = row * self._get_col_count(table_idx) + col
         for _ in range(total_moves):

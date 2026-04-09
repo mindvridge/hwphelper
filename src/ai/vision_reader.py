@@ -210,10 +210,18 @@ class VisionReader:
                 headers["Authorization"] = f"Bearer {api_key}"
             url = f"{base_url.rstrip('/')}/chat/completions"
 
-        with httpx.Client(timeout=120) as client:
-            resp = client.post(url, json=body, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        import time
+        for attempt in range(4):
+            with httpx.Client(timeout=120) as client:
+                resp = client.post(url, json=body, headers=headers)
+                if resp.status_code == 429 and attempt < 3:
+                    wait = 2 ** attempt
+                    logger.warning("비전 API rate limit, 재시도", attempt=attempt + 1, wait=wait)
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                break
 
         if provider == "anthropic":
             return data.get("content", [{}])[0].get("text", "")

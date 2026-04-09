@@ -245,19 +245,35 @@ class LLMRouter:
         # supports_tools가 false이면 도구를 전달하지 않음
         effective_tools = tools if cfg.get("supports_tools", True) else None
 
-        if provider == "anthropic":
-            if stream:
-                return self._stream_anthropic(client, model_name, messages, effective_tools, temperature, max_tokens)
-            return await self._call_anthropic(client, model_name, messages, effective_tools, temperature, max_tokens)
-        elif provider == "openai_compatible":
-            tc_override = cfg.get("tool_choice", "auto") if effective_tools else None
-            if stream:
-                return self._stream_httpx(client, model_name, messages, effective_tools, temperature, max_tokens)
-            return await self._call_httpx(client, model_name, messages, effective_tools, temperature, max_tokens, tc_override)
-        else:
-            if stream:
-                return self._stream_openai(client, model_name, messages, effective_tools, temperature, max_tokens)
-            return await self._call_openai(client, model_name, messages, effective_tools, temperature, max_tokens)
+        # 429 Rate Limit 재시도 (최대 3회, 지수 백오프)
+        import asyncio as _aio
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                if provider == "anthropic":
+                    if stream:
+                        return self._stream_anthropic(client, model_name, messages, effective_tools, temperature, max_tokens)
+                    return await self._call_anthropic(client, model_name, messages, effective_tools, temperature, max_tokens)
+                elif provider == "openai_compatible":
+                    tc_override = cfg.get("tool_choice", "auto") if effective_tools else None
+                    if stream:
+                        return self._stream_httpx(client, model_name, messages, effective_tools, temperature, max_tokens)
+                    return await self._call_httpx(client, model_name, messages, effective_tools, temperature, max_tokens, tc_override)
+                else:
+                    if stream:
+                        return self._stream_openai(client, model_name, messages, effective_tools, temperature, max_tokens)
+                    return await self._call_openai(client, model_name, messages, effective_tools, temperature, max_tokens)
+            except Exception as exc:
+                # httpx.HTTPStatusError → exc.response.status_code
+                status = getattr(exc, "status_code", 0) or getattr(exc, "status", 0)
+                if hasattr(exc, "response"):
+                    status = getattr(exc.response, "status_code", status)
+                if status == 429 and attempt < max_retries:
+                    wait = 3 * (attempt + 1)  # 3, 6, 9초
+                    logger.warning("Rate limit (429), 재시도", attempt=attempt + 1, wait=wait)
+                    await _aio.sleep(wait)
+                    continue
+                raise
 
     async def chat_with_tools(
         self,
@@ -527,8 +543,16 @@ class LLMRouter:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        resp = await http.post(f"{base_url}/chat/completions", json=body, headers=headers)
-        resp.raise_for_status()
+        import asyncio as _aio_retry
+        for _attempt in range(4):
+            resp = await http.post(f"{base_url}/chat/completions", json=body, headers=headers)
+            if resp.status_code == 429 and _attempt < 3:
+                wait = 3 * (_attempt + 1)  # 3, 6, 9초
+                logger.warning("httpx 429 rate limit, 재시도", attempt=_attempt + 1, wait=wait)
+                await _aio_retry.sleep(wait)
+                continue
+            resp.raise_for_status()
+            break
         data = resp.json()
 
         choice = data["choices"][0]
