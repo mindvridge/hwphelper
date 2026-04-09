@@ -359,8 +359,13 @@ class ChatAgent:
                         f"사용자 정보: {user_message}\n"
                         f"\n값만 작성하세요. 따옴표, 설명 금지. 예시와 같은 형식으로."
                     )
+                    use_vision_info = bool(page_images) and self._model_supports_vision(model_id)
+                    if use_vision_info:
+                        user_content_info = self._build_vision_prompt(prompt, page_images, max_pages=1)
+                    else:
+                        user_content_info = prompt
                     resp = await self.llm.chat(
-                        messages=[{"role": "system", "content": AUTOFILL_PROMPT}, {"role": "user", "content": prompt}],
+                        messages=[{"role": "system", "content": AUTOFILL_PROMPT}, {"role": "user", "content": user_content_info}],
                         model_id=model_id,
                     )
                     if not isinstance(resp, LLMResponse):
@@ -539,8 +544,13 @@ class ChatAgent:
                         f"예시와 동일한 형식으로 작성하세요.\n"
                         f"따옴표, 마크다운, 설명 금지. 값만 작성."
                     )
+                    use_vision_dt = bool(page_images) and self._model_supports_vision(model_id)
+                    if use_vision_dt:
+                        user_content_dt = self._build_vision_prompt(prompt, page_images, max_pages=1)
+                    else:
+                        user_content_dt = prompt
                     resp = await self.llm.chat(
-                        messages=[{"role": "system", "content": AUTOFILL_PROMPT}, {"role": "user", "content": prompt}],
+                        messages=[{"role": "system", "content": AUTOFILL_PROMPT}, {"role": "user", "content": user_content_dt}],
                         model_id=model_id,
                     )
                     if not isinstance(resp, LLMResponse):
