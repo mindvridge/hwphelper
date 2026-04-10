@@ -641,7 +641,7 @@ class ChatAgent:
                     ("본 지원사업을 통해 개발 또는 구체화하고자 하는 제품·서비스 개요", 0),
                     ("개발하고자 하는 창업 아이템의 국내·외 시장 현황 및 문제점 등", 1),
                     ("개발하고자 하는 창업 아이템을 사업기간 내 제품·서비스로 개발 또는 구체화", 2),
-                    ("경쟁사 분석, 목표 시장 진입 전략, 창업 아이템의 비즈니스 모델(수익화 모델), 사업 전체 로드맵, 투자유치 전략 등", 3),
+                    ("경쟁사 분석, 목표 시장 진입 전략", 3),
                     ("대표자, 팀원, 업무파트너(협력기업) 등 역량 활용 계획 등", 4),
                 ]
                 for find_text, idx in overview_replaces:
@@ -649,7 +649,46 @@ class ChatAgent:
                         await self._run_com(lambda o=find_text, n=ov_lines[idx]: filler._replace_text(o, n))
                         logger.info("개요 교체", section=idx, new=ov_lines[idx][:30])
 
-            yield ChatEvent(type="tool_result", data={"tool": "cleanup", "result": {"examples": len(originals), "overview": 5}})
+            # C. 팀원/파트너 예시 교체
+            await _aio_cleanup.sleep(5.0)
+            extra_replaces = [
+                ("공동대표", "CTO"),
+                ("○○전자", "AWS Korea"),
+                ("○○기업", "한국정보화진흥원"),
+                ("S/W 개발 총괄", "AI 엔진 개발 총괄"),
+                ("시제품 관련 H/W 제작·개발", "클라우드 인프라 운영"),
+                ("테스트 장비 지원", "스타트업 크레딧 프로그램"),
+                ("S/W 제작·개발", "멘토링 및 네트워킹"),
+                ("웹사이트 제작 용역", "전문 멘토 매칭"),
+            ]
+            for old_t, new_t in extra_replaces:
+                await self._run_com(lambda o=old_t, n=new_t: filler._replace_text(o, n))
+
+            # D. 파란색 텍스트를 검정으로 변경
+            # find_replace로 교체된 텍스트는 원본의 파란색을 유지하므로
+            # 내용이 채워진 표의 셀 색상을 검정으로 변경
+            def _fix_colors():
+                hwp_local = filler._hwp
+                # 내용이 채워진 1셀 표들 (본문, 개요 등)
+                for ti_fix in range(32):
+                    try:
+                        hwp_local.get_into_nth_table(ti_fix)
+                        cs = hwp_local.CharShape
+                        color = cs.Item("TextColor")
+                        if color != 0:  # 검정이 아니면
+                            hwp_local.HAction.Run("SelectAll")
+                            act = hwp_local.CreateAction("CharShape")
+                            ps = act.CreateSet()
+                            act.GetDefault(ps)
+                            ps.SetItem("TextColor", 0x000000)
+                            act.Execute(ps)
+                            hwp_local.Cancel()
+                    except Exception:
+                        pass
+            await self._run_com(_fix_colors)
+            logger.info("색상 검정 처리 완료")
+
+            yield ChatEvent(type="tool_result", data={"tool": "cleanup", "result": {"examples": 4, "overview": 5, "colors": "fixed"}})
         except Exception as exc:
             logger.debug("후처리 스킵", error=str(exc))
 
