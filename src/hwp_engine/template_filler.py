@@ -330,21 +330,39 @@ class TemplateFiller:
         hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
 
     def fill_body_section(self, table_idx: int, section: BodySection, contents: list[str]) -> None:
-        """본문 B1 셀의 특정 섹션에 내용을 채운다.
+        """본문 섹션의 내용을 채운다.
 
-        SelectAll → Delete → InsertText로 B1 셀 전체를 교체한다.
-        _enter_table 가드로 문서 삭제를 방지한다.
+        이 양식은 2열 헤더 표(A=제목, B=빈칸) + 1열 안내문 표(※)로 구성.
+        내용은 ※ 안내문이 있는 다음 표(table_idx+1)에 넣어야 한다.
+        find_replace로 ※ 안내문을 교체하여 서식을 보존한다.
         """
         hwp = self._hwp
-        if not self._enter_table(table_idx):
-            return
-        hwp.TableRightCell()  # B1
+
+        # ※ 안내문을 find_replace로 교체 (서식 보존)
+        if section.guide_text:
+            guide = section.guide_text.strip()
+            find_key = guide[:40] if len(guide) > 40 else guide
+            full_text = "\n".join(contents)
+            replace_text = full_text[:40] if len(full_text) > 40 else full_text
+            result = self._replace_text(find_key, replace_text)
+            if result:
+                logger.info("섹션 채우기 완료 (find_replace)",
+                            section=section.section_num, title=section.title[:30],
+                            filled=len(contents), total_markers=len(section.markers))
+                return
+
+        # find_replace 실패 시: 다음 표(안내문 표)에 SelectAll로 넣기
+        next_table = table_idx + 1
+        if not self._enter_table(next_table):
+            # 다음 표도 없으면 현재 표 B1에 시도
+            if not self._enter_table(table_idx):
+                return
+            hwp.TableRightCell()
 
         hwp.HAction.Run("SelectAll")
         hwp.HAction.Run("Delete")
 
-        # 제목 + 내용 삽입
-        full_text = f"{section.title}\n" + "\n".join(contents)
+        full_text = "\n".join(contents)
         lines = full_text.split("\n")
         for i, line in enumerate(lines):
             if line.strip():
@@ -546,19 +564,21 @@ class TemplateFiller:
             pass
 
     def fill_body_narrative(self, table_idx: int, section: BodySection, content: str) -> None:
-        """마커 없는 본문 섹션의 B1 셀에 내용을 작성한다.
+        """마커 없는 본문 섹션에 내용을 작성한다.
 
-        하이브리드: find_replace로 ※ 안내문을 교체하여 서식 보존.
+        find_replace로 ※ 안내문을 교체하여 서식 보존.
+        실패 시 다음 표(안내문 표)에 SelectAll 폴백.
         """
         hwp = self._hwp
 
-        # ※ 안내문을 find_replace로 교체 (서식 보존)
+        # find_replace로 ※ 안내문 교체 (서식 보존)
         replaced = False
         if section.guide_text:
             guide = section.guide_text.strip()
             if len(guide) > 5:
                 find_key = guide[:40] if len(guide) > 40 else guide
-                result = self._replace_text(find_key, content[:40] if len(content) > 40 else content)
+                replace_val = content[:40] if len(content) > 40 else content
+                result = self._replace_text(find_key, replace_val)
                 if result:
                     replaced = True
                 # 나머지 안내문 조각 제거
@@ -568,9 +588,9 @@ class TemplateFiller:
                         self._replace_text(part, "")
 
         if not replaced:
-            # 폴백: SelectAll
-            if self._enter_table(table_idx):
-                hwp.TableRightCell()
+            # 폴백: 다음 표(안내문 표)에 넣기
+            next_table = table_idx + 1
+            if self._enter_table(next_table):
                 hwp.HAction.Run("SelectAll")
                 hwp.HAction.Run("Delete")
                 lines = content.split("\n")

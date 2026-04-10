@@ -580,35 +580,33 @@ class ChatAgent:
             except Exception as e:
                 logger.warning("항목 작성 실패", item=item.get("title", item.get("label", "")), error=str(e))
 
-            # API rate limit 방지: 항목 간 3초 딜레이
+            # API rate limit 방지: 항목 간 5초 딜레이
             import asyncio as _aio_delay
-            await _aio_delay.sleep(3.0)
+            await _aio_delay.sleep(5.0)
 
-        # 2.5단계: 미교체 예시 데이터 후처리 (find_replace)
-        # 분석에서 누락된 표의 예시 데이터를 LLM에게 교체 요청
+        # 2.5단계: 미교체 예시 + 개요 요약 후처리 (find_replace)
         try:
-            yield ChatEvent(type="text_delta", data="\n잔여 예시 데이터 정리 중...\n")
+            yield ChatEvent(type="text_delta", data="\n잔여 예시 데이터 및 개요 요약 정리 중...\n")
+            import asyncio as _aio_cleanup
 
-            # LLM에게 교체할 예시 목록 생성 요청
+            # A. 기업정보/개요 예시 교체
             cleanup_prompt = (
                 f"다음 예시 데이터를 사용자 정보에 맞게 교체해주세요.\n"
                 f"사용자: {user_message}\n\n"
-                f"교체 대상:\n"
-                f"1. OO기술이 적용된 OO기능의(혜택을 제공하는) OO제품·서비스 등 → 창업아이템명\n"
-                f"2. OOOOO → 기업명\n"
-                f"3. 게토레이 → 제품/서비스 명칭 예시\n"
-                f"4. 스포츠음료 → 제품/서비스 범주 예시\n\n"
-                f"형식: 한 줄에 하나씩, 교체할 새 값만 작성하세요.\n"
-                f"번호, 따옴표, 설명 금지. 값만 4줄."
+                f"교체 대상 (한 줄에 하나씩 값만 작성):\n"
+                f"1. 창업아이템명 (예: OO기술이 적용된 OO제품)\n"
+                f"2. 기업명 (예: OOOOO)\n"
+                f"3. 제품/서비스 명칭\n"
+                f"4. 제품/서비스 범주\n\n"
+                f"값만 4줄. 번호, 따옴표, 설명 금지."
             )
-            import asyncio as _aio_cleanup
             await _aio_cleanup.sleep(3.0)
             cleanup_resp = await self.llm.chat(
                 messages=[{"role": "system", "content": AUTOFILL_PROMPT}, {"role": "user", "content": cleanup_prompt}],
                 model_id=model_id,
             )
             if isinstance(cleanup_resp, LLMResponse):
-                lines = [l.strip() for l in cleanup_resp.content.strip().split("\n") if l.strip()]
+                lines = [l.strip().strip('"').strip("'") for l in cleanup_resp.content.strip().split("\n") if l.strip()]
                 originals = [
                     "OO기술이 적용된 OO기능의(혜택을 제공하는) OO제품·서비스 등",
                     "OOOOO",
@@ -616,13 +614,44 @@ class ChatAgent:
                     "스포츠음료",
                 ]
                 for i, orig_text in enumerate(originals):
-                    if i < len(lines):
-                        new_text = lines[i].strip().strip('"').strip("'")
-                        if new_text and len(new_text) > 1:
-                            await self._run_com(lambda o=orig_text, n=new_text: filler._replace_text(o, n))
-                            logger.info("예시 교체", old=orig_text[:20], new=new_text[:20])
+                    if i < len(lines) and lines[i] and len(lines[i]) > 1:
+                        await self._run_com(lambda o=orig_text, n=lines[i]: filler._replace_text(o, n))
+                        logger.info("예시 교체", old=orig_text[:20], new=lines[i][:20])
+
+            # B. 개요 요약 표 ※ 안내문 교체
+            await _aio_cleanup.sleep(3.0)
+            overview_prompt = (
+                f"사용자 정보: {user_message}\n\n"
+                f"다음 7개 항목의 요약문을 작성하세요 (한 줄에 하나씩, 각 1~2문장):\n"
+                f"1. 아이템 개요\n"
+                f"2. 문제 인식 요약\n"
+                f"3. 실현 가능성 요약\n"
+                f"4. 성장전략 요약\n"
+                f"5. 팀 구성 요약\n\n"
+                f"값만 5줄. 번호, 따옴표, 설명 금지."
+            )
+            overview_resp = await self.llm.chat(
+                messages=[{"role": "system", "content": AUTOFILL_PROMPT}, {"role": "user", "content": overview_prompt}],
+                model_id=model_id,
+            )
+            if isinstance(overview_resp, LLMResponse):
+                ov_lines = [l.strip().strip('"') for l in overview_resp.content.strip().split("\n") if l.strip()]
+                # 개요 요약 ※ 안내문 → 요약문으로 교체
+                overview_replaces = [
+                    ("본 지원사업을 통해 개발 또는 구체화하고자 하는 제품·서비스 개요", 0),
+                    ("개발하고자 하는 창업 아이템의 국내·외 시장 현황 및 문제점 등", 1),
+                    ("개발하고자 하는 창업 아이템을 사업기간 내 제품·서비스로 개발 또는 구체화", 2),
+                    ("경쟁사 분석, 목표 시장 진입 전략, 창업 아이템의 비즈니스 모델(수익화 모델), 사업 전체 로드맵, 투자유치 전략 등", 3),
+                    ("대표자, 팀원, 업무파트너(협력기업) 등 역량 활용 계획 등", 4),
+                ]
+                for find_text, idx in overview_replaces:
+                    if idx < len(ov_lines) and ov_lines[idx] and len(ov_lines[idx]) > 5:
+                        await self._run_com(lambda o=find_text, n=ov_lines[idx]: filler._replace_text(o, n))
+                        logger.info("개요 교체", section=idx, new=ov_lines[idx][:30])
+
+            yield ChatEvent(type="tool_result", data={"tool": "cleanup", "result": {"examples": len(originals), "overview": 5}})
         except Exception as exc:
-            logger.debug("예시 후처리 스킵", error=str(exc))
+            logger.debug("후처리 스킵", error=str(exc))
 
         # 3단계: 완료 — COM 저장 및 정리, 세션 COM 재연결
         try:
