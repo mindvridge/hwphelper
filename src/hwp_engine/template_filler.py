@@ -718,6 +718,16 @@ class TemplateFiller:
         if len(lines) <= 1 and len(title) < 10:
             return None
 
+        # 채우면 안 되는 표 제외 (제목, 서약, 동의서, 체크리스트 등)
+        skip_keywords = [
+            "사업계획서", "신청서", "확약서", "동의서", "서약서",
+            "체크리스트", "제출서류", "[제출서류]", "개인정보",
+            "신청자 본인", "하기 본인", "위와 같이",
+        ]
+        for kw in skip_keywords:
+            if kw in title or kw in full[:100]:
+                return None
+
         sub_items = []
         for line in lines:
             stripped = line.strip()
