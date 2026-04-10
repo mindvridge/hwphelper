@@ -306,8 +306,8 @@ class TemplateFiller:
     def fill_info_field(self, table_idx: int, moves: int, text: str) -> None:
         """기업정보 표의 특정 셀에 값을 채운다.
 
-        find_replace로 예시값을 교체하여 서식을 완전 보존한다.
-        예시값이 없는 경우에만 SelectAll 방식을 사용한다.
+        SelectAll → Delete → InsertText로 정확한 셀에 쓴다.
+        _enter_table 가드로 문서 삭제를 방지한다.
         """
         hwp = self._hwp
         if not self._enter_table(table_idx):
@@ -315,72 +315,36 @@ class TemplateFiller:
         for _ in range(moves):
             hwp.TableRightCell()
 
-        # 현재 셀 텍스트 읽기
         hwp.HAction.Run("SelectAll")
-        hwp.HAction.Run("Copy")
-        try:
-            import win32clipboard
-            win32clipboard.OpenClipboard()
-            current = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-            win32clipboard.CloseClipboard()
-        except Exception:
-            current = ""
-        hwp.Cancel()
-
-        current = (current or "").strip()
-        if current and len(current) > 1:
-            # find_replace로 서식 보존 교체
-            self._replace_text(current, text)
-        else:
-            # 빈 셀: 직접 삽입
-            hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
-            hwp.HParameterSet.HInsertText.Text = text
-            hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+        hwp.HAction.Run("Delete")
+        hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+        hwp.HParameterSet.HInsertText.Text = text
+        hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
 
     def fill_body_section(self, table_idx: int, section: BodySection, contents: list[str]) -> None:
         """본문 B1 셀의 특정 섹션에 내용을 채운다.
 
-        전략: find_replace로 ※ 안내문과 ◦/- 마커의 빈 내용을 교체.
-        원본의 글머리표, 들여쓰기, 문단 서식을 100% 보존한다.
+        SelectAll → Delete → InsertText로 B1 셀 전체를 교체한다.
+        _enter_table 가드로 문서 삭제를 방지한다.
         """
         hwp = self._hwp
+        if not self._enter_table(table_idx):
+            return
+        hwp.TableRightCell()  # B1
 
-        # ※ 안내문 삭제 (find_replace로 빈 문자열로 교체)
-        if section.guide_text:
-            guide_parts = section.guide_text.split("\n")
-            for part in guide_parts:
-                part = part.strip()
-                if part and len(part) > 5:
-                    self._replace_text(part, "")
+        hwp.HAction.Run("SelectAll")
+        hwp.HAction.Run("Delete")
 
-        # ◦/- 마커에 내용 채우기
-        # contents 리스트의 각 항목을 마커 순서대로 채움
-        marker_idx = 0
-        for content in contents:
-            if marker_idx < len(section.markers):
-                marker = section.markers[marker_idx]
-                # 빈 마커 자리에 내용을 추가하는 대신
-                # 마커 이후 빈 줄에 내용을 삽입
-                marker_idx += 1
-
-        # 마커가 없거나 contents가 있으면 ※ 자리에 내용을 삽입
-        if contents:
-            full_content = "\n".join(contents)
-            # ※ 삭제 후 남은 빈 줄에 내용 삽입 시도
-            # find_replace가 안 되면 B1 셀에 추가
-            if not self._replace_text("※", full_content[:30]):
-                # B1 진입 후 끝에 추가
-                if self._enter_table(table_idx):
-                    hwp.TableRightCell()
-                    hwp.HAction.Run("SelectAll")
-                    hwp.HAction.Run("Delete")
-                    for i, line in enumerate(full_content.split("\n")):
-                        if line.strip():
-                            hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
-                            hwp.HParameterSet.HInsertText.Text = line
-                            hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
-                        if i < len(full_content.split("\n")) - 1:
-                            hwp.HAction.Run("BreakPara")
+        # 제목 + 내용 삽입
+        full_text = f"{section.title}\n" + "\n".join(contents)
+        lines = full_text.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip():
+                hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+                hwp.HParameterSet.HInsertText.Text = line
+                hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+            if i < len(lines) - 1:
+                hwp.HAction.Run("BreakPara")
 
         logger.info("섹션 채우기 완료",
                      section=section.section_num,
@@ -576,38 +540,59 @@ class TemplateFiller:
     def fill_body_narrative(self, table_idx: int, section: BodySection, content: str) -> None:
         """마커 없는 본문 섹션의 B1 셀에 내용을 작성한다.
 
-        find_replace로 ※ 안내문을 교체하여 서식을 완전 보존한다.
+        하이브리드: find_replace로 ※ 안내문을 교체하여 서식 보존.
         """
         hwp = self._hwp
 
         # ※ 안내문을 find_replace로 교체 (서식 보존)
+        replaced = False
         if section.guide_text:
-            # 안내문의 핵심 부분으로 교체
-            guide_key = section.guide_text.strip()
-            if len(guide_key) > 50:
-                guide_key = guide_key[:50]
-            self._replace_text(guide_key, content[:50] if len(content) > 50 else content)
+            guide = section.guide_text.strip()
+            if len(guide) > 5:
+                find_key = guide[:40] if len(guide) > 40 else guide
+                result = self._replace_text(find_key, content[:40] if len(content) > 40 else content)
+                if result:
+                    replaced = True
+                # 나머지 안내문 조각 제거
+                for part in section.guide_text.split("\n"):
+                    part = part.strip()
+                    if part and len(part) > 5:
+                        self._replace_text(part, "")
 
-            # 나머지 안내문 조각도 제거
-            for part in section.guide_text.split("\n"):
-                part = part.strip()
-                if part and len(part) > 5 and part not in content:
-                    self._replace_text(part, "")
+        if not replaced:
+            # 폴백: SelectAll
+            if self._enter_table(table_idx):
+                hwp.TableRightCell()
+                hwp.HAction.Run("SelectAll")
+                hwp.HAction.Run("Delete")
+                lines = content.split("\n")
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+                        hwp.HParameterSet.HInsertText.Text = line
+                        hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+                    if i < len(lines) - 1:
+                        hwp.HAction.Run("BreakPara")
 
         logger.info("본문 서술형 채우기 완료", section=section.section_num, title=section.title[:30])
 
     def fill_narrative(self, table_idx: int, content: str) -> None:
         """서술형 셀의 안내문을 교체하고 내용을 작성한다.
 
-        find_replace로 원본 텍스트를 교체하여 서식을 완전 보존한다.
+        하이브리드: find_replace로 ※ 안내문을 제거/교체하여 서식 보존.
+        find_replace 실패 시에만 SelectAll 폴백.
         """
         hwp = self._hwp
 
-        # 표의 원본 텍스트를 읽어서 find_replace로 교체
+        # 표의 원본 텍스트에서 ※ 안내문 부분을 find_replace로 교체
+        # 이렇게 하면 제목(①, ②), 번호(1), 2)) 등 서식이 보존됨
+        replaced = False
+
+        # 1차: ※ 안내문을 찾아서 내용으로 교체
         if not self._enter_table(table_idx):
             return
 
-        # 현재 셀 텍스트 읽기
+        # 현재 셀의 전체 텍스트 읽기 (표 내용 파악)
         hwp.HAction.Run("SelectAll")
         hwp.HAction.Run("Copy")
         try:
@@ -620,15 +605,34 @@ class TemplateFiller:
         hwp.Cancel()
 
         current = (current or "").strip()
-        if current and len(current) > 5:
-            # 원본 텍스트의 앞부분으로 find_replace (서식 보존)
-            find_key = current[:40] if len(current) > 40 else current
-            self._replace_text(find_key, content[:40] if len(content) > 40 else content)
-        else:
-            # 빈 셀: 직접 삽입
-            hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
-            hwp.HParameterSet.HInsertText.Text = content
-            hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+
+        # ※ 안내문 부분을 find_replace로 교체
+        if current:
+            lines = current.split("\n")
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("※") and len(stripped) > 5:
+                    # ※ 안내문을 내용으로 교체 (첫 번째만)
+                    if not replaced:
+                        self._replace_text(stripped[:40], content[:40] if len(content) > 40 else content)
+                        replaced = True
+                    else:
+                        # 나머지 ※ 안내문은 삭제
+                        self._replace_text(stripped[:40], "")
+
+        if not replaced:
+            # find_replace 실패 시 SelectAll 폴백
+            if self._enter_table(table_idx):
+                hwp.HAction.Run("SelectAll")
+                hwp.HAction.Run("Delete")
+                lines = content.split("\n")
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+                        hwp.HParameterSet.HInsertText.Text = line
+                        hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+                    if i < len(lines) - 1:
+                        hwp.HAction.Run("BreakPara")
 
     # ------------------------------------------------------------------
     # 내부 분석 로직
@@ -769,7 +773,8 @@ class TemplateFiller:
     def fill_data_cell(self, table_idx: int, row: int, col: int, text: str) -> None:
         """데이터 표의 특정 셀에 값을 채운다.
 
-        find_replace로 예시값을 교체하여 서식을 완전 보존한다.
+        SelectAll → Delete → InsertText로 정확한 셀에 쓴다.
+        _enter_table 가드로 문서 삭제를 방지한다.
         """
         hwp = self._hwp
         if not self._enter_table(table_idx):
@@ -779,27 +784,21 @@ class TemplateFiller:
         for _ in range(total_moves):
             hwp.TableRightCell()
 
-        # 현재 셀 텍스트 읽기
         hwp.HAction.Run("SelectAll")
-        hwp.HAction.Run("Copy")
-        try:
-            import win32clipboard
-            win32clipboard.OpenClipboard()
-            current = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-            win32clipboard.CloseClipboard()
-        except Exception:
-            current = ""
-        hwp.Cancel()
+        hwp.HAction.Run("Delete")
 
-        current = (current or "").strip()
-        if current and len(current) > 1:
-            # find_replace로 서식 보존 교체
-            self._replace_text(current, text)
-        else:
-            # 빈 셀: 직접 삽입
-            hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
-            hwp.HParameterSet.HInsertText.Text = text
-            hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
+        # 텍스트 색상을 검정으로
+        try:
+            act = hwp.HParameterSet.HCharShape
+            hwp.HAction.GetDefault("CharShape", act.HSet)
+            act.TextColor = 0x00000000
+            hwp.HAction.Execute("CharShape", act.HSet)
+        except Exception:
+            pass
+
+        hwp.HAction.GetDefault("InsertText", hwp.HParameterSet.HInsertText.HSet)
+        hwp.HParameterSet.HInsertText.Text = text
+        hwp.HAction.Execute("InsertText", hwp.HParameterSet.HInsertText.HSet)
 
     def _get_col_count(self, table_idx: int) -> int:
         """표의 열 수를 반환한다."""
