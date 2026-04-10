@@ -637,17 +637,31 @@ class ChatAgent:
             if isinstance(overview_resp, LLMResponse):
                 ov_lines = [l.strip().strip('"') for l in overview_resp.content.strip().split("\n") if l.strip()]
                 # 개요 요약 ※ 안내문 → 요약문으로 교체
-                overview_replaces = [
-                    ("본 지원사업을 통해 개발 또는 구체화하고자 하는 제품·서비스 개요", 0),
-                    ("개발하고자 하는 창업 아이템의 국내·외 시장 현황 및 문제점 등", 1),
-                    ("개발하고자 하는 창업 아이템을 사업기간 내 제품·서비스로 개발 또는 구체화", 2),
-                    ("경쟁사 분석, 목표 시장 진입 전략", 3),
-                    ("대표자, 팀원, 업무파트너(협력기업) 등 역량 활용 계획 등", 4),
-                ]
-                for find_text, idx in overview_replaces:
-                    if idx < len(ov_lines) and ov_lines[idx] and len(ov_lines[idx]) > 5:
-                        await self._run_com(lambda o=find_text, n=ov_lines[idx]: filler._replace_text(o, n))
-                        logger.info("개요 교체", section=idx, new=ov_lines[idx][:30])
+                # 개요 요약 표에 직접 진입하여 셀 교체
+                # find_replace는 이 표에서 작동하지 않으므로 TableRightCell로 이동
+                # 셀 순서: 0=명칭, 1=명칭값, 2=범주, 3=범주값,
+                #          4=아이템개요, 5=아이템개요값, 6=문제인식, 7=문제인식값,
+                #          8=실현가능성, 9=실현가능성값, 10=성장전략, 11=성장전략값,
+                #          12=팀구성, 13=팀구성값
+                overview_moves = [5, 7, 9, 11, 13]  # 값이 들어갈 셀 위치
+                def _fill_overview():
+                    hwp_local = filler._hwp
+                    for ov_idx, moves in enumerate(overview_moves):
+                        if ov_idx >= len(ov_lines) or not ov_lines[ov_idx]:
+                            continue
+                        try:
+                            hwp_local.get_into_nth_table(6)
+                            for _ in range(moves):
+                                hwp_local.TableRightCell()
+                            hwp_local.HAction.Run("SelectAll")
+                            hwp_local.HAction.Run("Delete")
+                            hwp_local.HAction.GetDefault("InsertText", hwp_local.HParameterSet.HInsertText.HSet)
+                            hwp_local.HParameterSet.HInsertText.Text = ov_lines[ov_idx]
+                            hwp_local.HAction.Execute("InsertText", hwp_local.HParameterSet.HInsertText.HSet)
+                        except Exception:
+                            pass
+                await self._run_com(_fill_overview)
+                logger.info("개요 요약 직접 채우기 완료", filled=min(len(ov_lines), len(overview_moves)))
 
             # C. 팀원/파트너 예시 교체
             await _aio_cleanup.sleep(5.0)
@@ -664,27 +678,33 @@ class ChatAgent:
             for old_t, new_t in extra_replaces:
                 await self._run_com(lambda o=old_t, n=new_t: filler._replace_text(o, n))
 
-            # D. 파란색 텍스트를 검정으로 변경
-            # find_replace로 교체된 텍스트는 원본의 파란색을 유지하므로
-            # 내용이 채워진 표의 셀 색상을 검정으로 변경
+            # D. 문서 전체에서 파란색 텍스트를 검정으로 일괄 변환
             def _fix_colors():
                 hwp_local = filler._hwp
-                # 내용이 채워진 1셀 표들 (본문, 개요 등)
-                for ti_fix in range(32):
+                # 모든 표의 모든 셀을 순회하면서 색상 변경
+                for ti_fix in range(40):
                     try:
                         hwp_local.get_into_nth_table(ti_fix)
-                        cs = hwp_local.CharShape
-                        color = cs.Item("TextColor")
-                        if color != 0:  # 검정이 아니면
+                        # 셀 전체 선택 → 색상 변경
+                        hwp_local.HAction.Run("SelectAll")
+                        act = hwp_local.CreateAction("CharShape")
+                        ps = act.CreateSet()
+                        act.GetDefault(ps)
+                        ps.SetItem("TextColor", 0x000000)
+                        act.Execute(ps)
+                        hwp_local.Cancel()
+                        # 같은 표의 다른 셀도 순회
+                        for _ in range(50):
+                            hwp_local.TableRightCell()
                             hwp_local.HAction.Run("SelectAll")
-                            act = hwp_local.CreateAction("CharShape")
-                            ps = act.CreateSet()
-                            act.GetDefault(ps)
-                            ps.SetItem("TextColor", 0x000000)
-                            act.Execute(ps)
+                            act2 = hwp_local.CreateAction("CharShape")
+                            ps2 = act2.CreateSet()
+                            act2.GetDefault(ps2)
+                            ps2.SetItem("TextColor", 0x000000)
+                            act2.Execute(ps2)
                             hwp_local.Cancel()
                     except Exception:
-                        pass
+                        break
             await self._run_com(_fix_colors)
             logger.info("색상 검정 처리 완료")
 
