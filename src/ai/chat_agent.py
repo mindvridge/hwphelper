@@ -372,7 +372,7 @@ class ChatAgent:
                         continue
                     value = resp.content.strip().strip('"').strip("'")
                     if value and len(value) > 1:
-                        await self._run_com(lambda t=item["table_idx"], i=item["index"], v=value: filler.fill_info_field(t, i, v))
+                        await self._run_com(lambda t=item["table_idx"], i=item["index"], v=value, ex=item.get("example", ""): filler.fill_info_field(t, i, v, example=ex))
                         wrote += 1
                         yield ChatEvent(type="tool_result", data={"tool": "fill_info", "result": {"label": item["label"], "value": value}})
 
@@ -565,7 +565,7 @@ class ChatAgent:
                         val = values[vi]
                         if val:
                             await self._run_com(
-                                lambda t=item["table_idx"], r=ec["row"], c=ec["col"], v=val: filler.fill_data_cell(t, r, c, v)
+                                lambda t=item["table_idx"], r=ec["row"], c=ec["col"], v=val, ex=ec.get("example", ""): filler.fill_data_cell(t, r, c, v, example=ex)
                             )
                             filled_count += 1
 
@@ -583,6 +583,46 @@ class ChatAgent:
             # API rate limit 방지: 항목 간 3초 딜레이
             import asyncio as _aio_delay
             await _aio_delay.sleep(3.0)
+
+        # 2.5단계: 미교체 예시 데이터 후처리 (find_replace)
+        # 분석에서 누락된 표의 예시 데이터를 LLM에게 교체 요청
+        try:
+            yield ChatEvent(type="text_delta", data="\n잔여 예시 데이터 정리 중...\n")
+
+            # LLM에게 교체할 예시 목록 생성 요청
+            cleanup_prompt = (
+                f"다음 예시 데이터를 사용자 정보에 맞게 교체해주세요.\n"
+                f"사용자: {user_message}\n\n"
+                f"교체 대상:\n"
+                f"1. OO기술이 적용된 OO기능의(혜택을 제공하는) OO제품·서비스 등 → 창업아이템명\n"
+                f"2. OOOOO → 기업명\n"
+                f"3. 게토레이 → 제품/서비스 명칭 예시\n"
+                f"4. 스포츠음료 → 제품/서비스 범주 예시\n\n"
+                f"형식: 한 줄에 하나씩, 교체할 새 값만 작성하세요.\n"
+                f"번호, 따옴표, 설명 금지. 값만 4줄."
+            )
+            import asyncio as _aio_cleanup
+            await _aio_cleanup.sleep(3.0)
+            cleanup_resp = await self.llm.chat(
+                messages=[{"role": "system", "content": AUTOFILL_PROMPT}, {"role": "user", "content": cleanup_prompt}],
+                model_id=model_id,
+            )
+            if isinstance(cleanup_resp, LLMResponse):
+                lines = [l.strip() for l in cleanup_resp.content.strip().split("\n") if l.strip()]
+                originals = [
+                    "OO기술이 적용된 OO기능의(혜택을 제공하는) OO제품·서비스 등",
+                    "OOOOO",
+                    "게토레이",
+                    "스포츠음료",
+                ]
+                for i, orig_text in enumerate(originals):
+                    if i < len(lines):
+                        new_text = lines[i].strip().strip('"').strip("'")
+                        if new_text and len(new_text) > 1:
+                            await self._run_com(lambda o=orig_text, n=new_text: filler._replace_text(o, n))
+                            logger.info("예시 교체", old=orig_text[:20], new=new_text[:20])
+        except Exception as exc:
+            logger.debug("예시 후처리 스킵", error=str(exc))
 
         # 3단계: 완료 — COM 저장 및 정리, 세션 COM 재연결
         try:

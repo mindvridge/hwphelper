@@ -303,13 +303,21 @@ class TemplateFiller:
             return False
         return True
 
-    def fill_info_field(self, table_idx: int, moves: int, text: str) -> None:
+    def fill_info_field(self, table_idx: int, moves: int, text: str, example: str = "") -> None:
         """기업정보 표의 특정 셀에 값을 채운다.
 
-        SelectAll → Delete → InsertText로 정확한 셀에 쓴다.
-        _enter_table 가드로 문서 삭제를 방지한다.
+        하이브리드: 예시값이 있으면 find_replace로 교체 (서식 보존 + 셀 위치 무관).
+        예시값이 없으면 SelectAll 폴백.
         """
         hwp = self._hwp
+
+        # 1차: 예시값으로 find_replace (병합 셀에서도 정확하게 작동)
+        if example and len(example) > 1:
+            result = self._replace_text(example, text)
+            if result:
+                return
+
+        # 2차: SelectAll 폴백
         if not self._enter_table(table_idx):
             return
         for _ in range(moves):
@@ -770,13 +778,21 @@ class TemplateFiller:
             empty_cells=empty_cells,
         )
 
-    def fill_data_cell(self, table_idx: int, row: int, col: int, text: str) -> None:
+    def fill_data_cell(self, table_idx: int, row: int, col: int, text: str, example: str = "") -> None:
         """데이터 표의 특정 셀에 값을 채운다.
 
-        SelectAll → Delete → InsertText로 정확한 셀에 쓴다.
-        _enter_table 가드로 문서 삭제를 방지한다.
+        하이브리드: 예시값이 있으면 find_replace (서식 보존 + 병합 셀 안전).
+        없으면 SelectAll 폴백.
         """
         hwp = self._hwp
+
+        # 1차: 예시값으로 find_replace
+        if example and len(example) > 1:
+            result = self._replace_text(example, text)
+            if result:
+                return
+
+        # 2차: SelectAll 폴백
         if not self._enter_table(table_idx):
             return
 
