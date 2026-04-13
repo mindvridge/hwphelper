@@ -343,6 +343,8 @@ class ChatAgent:
         yield ChatEvent(type="text_delta", data=f"{', '.join(parts)} 발견. 작성을 시작합니다...\n\n")
 
         # 2단계: 항목별 LLM 생성 → 적절한 위치에 쓰기
+        # 역순 처리: 뒤쪽 표부터 채워서 앞쪽 표의 인덱스가 밀리지 않도록
+        items.sort(key=lambda x: x.get("table_idx", 0), reverse=True)
         wrote = 0
         for idx, item in enumerate(items):
             yield ChatEvent(type="progress", data={
