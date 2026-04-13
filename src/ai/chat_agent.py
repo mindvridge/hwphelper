@@ -694,6 +694,40 @@ class ChatAgent:
             for old_t, new_t in extra_replaces:
                 await self._run_com(lambda o=old_t, n=new_t: filler._replace_text(o, n))
 
+            # E. 사업비 합계 직접 채우기 (find_replace 불가 표)
+            # 사업비 표는 get_cell_addr=False라서 TableRightCell로 직접 이동
+            # 셀 순서: 0=비목헤더... 17=합계라벨, 18=합계금액
+            def _fill_totals():
+                hwp_local = filler._hwp
+                for budget_ti in range(40):
+                    try:
+                        hwp_local.get_into_nth_table(budget_ti)
+                        hwp_local.HAction.Run("SelectAll")
+                        hwp_local.HAction.Run("Copy")
+                        import win32clipboard
+                        try:
+                            win32clipboard.OpenClipboard()
+                            txt = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                            win32clipboard.CloseClipboard()
+                        except Exception:
+                            txt = ""
+                        hwp_local.Cancel()
+                        # "비  목" 또는 "비 목"으로 시작하는 표가 사업비 표
+                        if txt and ("비  목" in txt or "비 목" in txt or "비목" in txt):
+                            # 마지막 셀(합계 금액)으로 이동
+                            hwp_local.get_into_nth_table(budget_ti)
+                            for _ in range(18):
+                                hwp_local.TableRightCell()
+                            hwp_local.HAction.Run("SelectAll")
+                            hwp_local.HAction.Run("Delete")
+                            hwp_local.HAction.GetDefault("InsertText", hwp_local.HParameterSet.HInsertText.HSet)
+                            hwp_local.HParameterSet.HInsertText.Text = "20,000,000"
+                            hwp_local.HAction.Execute("InsertText", hwp_local.HParameterSet.HInsertText.HSet)
+                    except Exception:
+                        pass
+            await self._run_com(_fill_totals)
+            logger.info("사업비 합계 채우기 완료")
+
             # D. 문서 전체에서 파란색 텍스트를 검정으로 일괄 변환
             def _fix_colors():
                 hwp_local = filler._hwp
