@@ -665,9 +665,10 @@ class ChatAgent:
                 await self._run_com(_fill_overview)
                 logger.info("개요 요약 직접 채우기 완료", filled=min(len(ov_lines), len(overview_moves)))
 
-            # C. 팀원/파트너 예시 교체
+            # C. 잔여 예시 교체 (팀원/파트너 + 안내문 + 합계 등)
             await _aio_cleanup.sleep(5.0)
             extra_replaces = [
+                # 팀원/파트너
                 ("공동대표", "CTO"),
                 ("○○전자", "AWS Korea"),
                 ("○○기업", "한국정보화진흥원"),
@@ -676,6 +677,18 @@ class ChatAgent:
                 ("테스트 장비 지원", "스타트업 크레딧 프로그램"),
                 ("S/W 제작·개발", "멘토링 및 네트워킹"),
                 ("웹사이트 제작 용역", "전문 멘토 매칭"),
+                # 개요 명칭/범주 나머지 예시
+                ("예시 2 : Windows", ""),
+                ("예시 3 : 알파고", ""),
+                ("예시 2 : OS(운영체계)", ""),
+                ("예시 3 : 인공지능프로그램", ""),
+                ("예시 2 : OS", ""),
+                ("예시 3 : 인공지능", ""),
+                # 안내문 잔존
+                ("협약기간 내 제작·개발 완료할 최종 생산품의 형태, 수량 등 기재", ""),
+                ("협약기간 내  제작·개발 완료할 최종 생산품의 형태, 수량 등 기재", ""),
+                # 합계
+                ("...", "20,000,000"),
             ]
             for old_t, new_t in extra_replaces:
                 await self._run_com(lambda o=old_t, n=new_t: filler._replace_text(o, n))
